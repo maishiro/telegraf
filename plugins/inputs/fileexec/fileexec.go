@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/tail"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal"
 	"github.com/influxdata/telegraf/internal/globpath"
@@ -257,43 +256,44 @@ func (t *FileExec) tailNewFiles(fromBeginning bool) error {
 	for _, filepath := range t.Files {
 		g, err := globpath.Compile(filepath)
 		if err != nil {
-			t.Log.Errorf("Glob %q failed to compile: %s", filepath, err.Error())
+			t.Log.Errorf("tailNewFiles() Glob %q failed to compile: %s", filepath, err.Error())
 		}
 		for _, file := range g.Match() {
 			fileInfo, _ := os.Stat(file)
 			if fileInfo != nil {
-				t.Log.Debugf("receiver file:%v", fileInfo.ModTime())
-			} else {
-				t.Log.Warn("receiver() finish")
-			}
+				t.Log.Debugf("tailNewFiles() receiver file:%v", fileInfo.ModTime())
 
-			modTime, ok := t.modTimes[file]
-			if ok {
-				t.Log.Debugf("prev %v", modTime)
-			} else {
-				t.Log.Infof("new file [%s]", file)
+				modTime, ok := t.modTimes[file]
+				if ok {
+					t.Log.Debugf("tailNewFiles() prev %v", modTime)
+				} else {
+					t.Log.Infof("tailNewFiles() new file [%s]", file)
 
-				// 起動時に見つけたファイルにはとりあえず処理しない
-				if !fromBeginning {
-					offsetsMutex.Lock()
+					// 起動時に見つけたファイルにはとりあえず処理しない
+					if !fromBeginning {
+						offsetsMutex.Lock()
+						t.modTimes[file] = fileInfo.ModTime()
+						offsetsMutex.Unlock()
+						continue
+					}
+				}
+
+				// 起動後、新規作成されたファイル or 更新されたファイル
+				if (ok == false) || fileInfo.ModTime().After(modTime) {
+					t.Log.Infof("tailNewFiles() changed file:[%s] %v", file, fileInfo.ModTime())
+
+					// do something
+					e := t.NotifyFile(file)
+					if e != nil {
+						t.acc.AddError(err)
+						continue
+					}
+
 					t.modTimes[file] = fileInfo.ModTime()
-					offsetsMutex.Unlock()
-					continue
-				}
-			}
-
-			if fileInfo.ModTime().After(modTime) {
-				t.Log.Infof("changed file:[%s]", file)
-				t.Log.Infof("receiver file:%v", fileInfo.ModTime())
-
-				// do something
-				e := t.NotifyFile(file)
-				if e != nil {
-					t.acc.AddError(err)
-					continue
 				}
 
-				t.modTimes[file] = fileInfo.ModTime()
+			} else {
+				t.Log.Warnf("tailNewFiles() os.Stat() failed [%s]", file)
 			}
 		}
 	}
@@ -377,49 +377,6 @@ func parseLine(parser parsers.Parser, line string, firstLine bool) ([]telegraf.M
 	default:
 		return parser.Parse([]byte(line))
 	}
-}
-
-// Receiver is launched as a goroutine to continuously watch a tailed logfile
-// for changes, parse any incoming msgs, and add to the accumulator.
-func (t *FileExec) receiver(parser parsers.Parser, tailer *tail.Tail) {
-	t.Log.Debug("receiver() begin")
-
-	t.Log.Infof("receiver file:[%s]", tailer.Filename)
-
-	fileInfo, _ := os.Stat(tailer.Filename)
-	if fileInfo != nil {
-		t.Log.Infof("receiver file:%v", fileInfo.ModTime())
-	} else {
-		t.Log.Warn("receiver() finish")
-		return
-	}
-
-	t.Log.Debugf("Tail removed for %q", tailer.Filename)
-
-	if err := tailer.Err(); err != nil {
-		t.Log.Errorf("Tailing %q: %s", tailer.Filename, err.Error())
-	}
-
-	//
-	//
-	modTime, ok := t.modTimes[tailer.Filename]
-	if ok {
-		t.Log.Infof("prev %v", modTime)
-	} else {
-		t.Log.Infof("new file [%s]", tailer.Filename)
-		t.modTimes[tailer.Filename] = fileInfo.ModTime()
-
-		t.Log.Info("receiver() finish")
-		return
-	}
-
-	if fileInfo.ModTime().After(modTime) {
-		t.Log.Infof("changed file:[%s]", tailer.Filename)
-		t.Log.Infof("receiver file:%v", fileInfo.ModTime())
-		t.modTimes[tailer.Filename] = fileInfo.ModTime()
-	}
-
-	t.Log.Debug("receiver() finish")
 }
 
 func (t *FileExec) Stop() {
