@@ -178,6 +178,7 @@ For documentation on the latest development code see the [documentation index][d
 * [fail2ban](./plugins/inputs/fail2ban)
 * [fibaro](./plugins/inputs/fibaro)
 * [file](./plugins/inputs/file)
+* [fileexec](./plugins/inputs/fileexec)
 * [filestat](./plugins/inputs/filestat)
 * [filecount](./plugins/inputs/filecount)
 * [fireboard](/plugins/inputs/fireboard)
