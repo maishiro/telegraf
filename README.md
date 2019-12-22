@@ -394,6 +394,7 @@ For documentation on the latest development code see the [documentation index][d
 * [riemann](./plugins/outputs/riemann)
 * [riemann_legacy](./plugins/outputs/riemann_legacy)
 * [socket_writer](./plugins/outputs/socket_writer)
+* [sqlite3](./plugins/outputs/sqlite3)
 * [stackdriver](./plugins/outputs/stackdriver)
 * [syslog](./plugins/outputs/syslog)
 * [tcp](./plugins/outputs/socket_writer)
