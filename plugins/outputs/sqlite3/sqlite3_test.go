@@ -75,9 +75,9 @@ func Test_insertSQL(t *testing.T) {
 		{
 			Metrics: testutil.MockMetrics(),
 			Want: strings.TrimSpace(`
-INSERT INTO my_table ("timestamp", "name", "tags", "fields")
+INSERT INTO my_table ('timestamp', 'name', 'tags', 'fields')
 VALUES
-("2009-11-10T23:00:00+0000", "test1", "{'tag1':'value1'}", "{'value':1}");
+('2009-11-10T23:00:00+0000', 'test1', '{"tag1":"value1"}', '{"value":1}');
 `),
 		},
 	}
@@ -105,8 +105,8 @@ func Test_escapeValue(t *testing.T) {
 		Want string
 	}{
 		// string
-		{`foo`, `"foo"`},
-		{`foo'bar 'yeah`, `"foo'bar 'yeah"`},
+		{`foo`, `'foo'`},
+		{`foo'bar 'yeah`, `'foo''bar ''yeah'`},
 		// int types
 		{int64(123), `123`},
 		{uint64(123), `123`},
@@ -116,19 +116,19 @@ func Test_escapeValue(t *testing.T) {
 		// float types
 		{float64(123.456), `123.456`},
 		// time.Time
-		{time.Date(2017, 8, 7, 16, 44, 52, 123*1000*1000, time.FixedZone("Dreamland", 5400)), `"2017-08-07T16:44:52.123+0130"`},
+		{time.Date(2017, 8, 7, 16, 44, 52, 123*1000*1000, time.FixedZone("Dreamland", 5400)), `'2017-08-07T16:44:52.123+0130'`},
 		// map[string]string
-		{map[string]string{}, `"{}"`},
-		{map[string]string(nil), `"{}"`},
-		{map[string]string{"foo": "bar"}, `"{'foo':'bar'}"`},
-		{map[string]string{"foo": "bar", "one": "more"}, `"{'foo':'bar', 'one':'more'}"`},
+		{map[string]string{}, `'{}'`},
+		{map[string]string(nil), `'{}'`},
+		{map[string]string{"foo": "bar"}, `'{"foo":"bar"}'`},
+		{map[string]string{"foo": "bar", "one": "more"}, `'{"foo":"bar", "one":"more"}'`},
 		// map[string]interface{}
-		{map[string]interface{}{}, `"{}"`},
-		{map[string]interface{}(nil), `"{}"`},
-		{map[string]interface{}{"foo": "bar"}, `"{'foo':'bar'}"`},
-		{map[string]interface{}{"foo": "bar", "one": "more"}, `"{'foo':'bar', 'one':'more'}"`},
-		{map[string]interface{}{"foo": map[string]interface{}{"one": "more"}}, `"{'foo':{'one':'more'}}"`},
-		//{map[string]interface{}{`fo"o`: `b'ar`, `ab'c`: `xy"z`, `on"""e`: `mo'''re`}, `"{'ab''c':'xy"z', 'fo"o':'b''ar', 'on"""e':'mo''''''re'}"`},
+		{map[string]interface{}{}, `'{}'`},
+		{map[string]interface{}(nil), `'{}'`},
+		{map[string]interface{}{"foo": "bar"}, `'{"foo":"bar"}'`},
+		{map[string]interface{}{"foo": "bar", "one": "more"}, `'{"foo":"bar", "one":"more"}'`},
+		{map[string]interface{}{"foo": map[string]interface{}{"one": "more"}}, `'{"foo":{"one":"more"}}'`},
+		//{map[string]interface{}{`fo"o`: `b'ar`, `ab'c`: `xy"z`, `on"""e`: `mo'''re`}, `'{"ab'c":"xy""z", "fo""o":"b'ar", "on""""""e":"mo'''re"}'`},
 	}
 
 	file := testFILE()

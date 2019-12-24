@@ -80,7 +80,7 @@ func insertSQL(table string, metrics []telegraf.Metric) (string, error) {
 	for i, m := range metrics {
 
 		cols := []interface{}{
-			m.Time().UTC(),
+			m.Time(),
 			m.Name(),
 			m.Tags(),
 			m.Fields(),
@@ -96,7 +96,7 @@ func insertSQL(table string, metrics []telegraf.Metric) (string, error) {
 		}
 		rows[i] = `(` + strings.Join(escapedCols, ", ") + `)`
 	}
-	sql := `INSERT INTO ` + table + ` ("timestamp", "name", "tags", "fields")
+	sql := `INSERT INTO ` + table + ` ('timestamp', 'name', 'tags', 'fields')
 VALUES
 ` + strings.Join(rows, " ,\n") + `;`
 	fmt.Printf("insertSQL() [%s]", sql)
@@ -116,7 +116,7 @@ VALUES
 func escapeValue(val interface{}) (string, error) {
 	switch t := val.(type) {
 	case string:
-		return escapeString(t, `"`), nil
+		return escapeString(t, `'`), nil
 	case int64, float64:
 		return fmt.Sprint(t), nil
 	case uint64:
@@ -148,7 +148,7 @@ func escapeValue(val interface{}) (string, error) {
 func escapeValue2(val interface{}) (string, error) {
 	switch t := val.(type) {
 	case string:
-		return escapeString(t, `'`), nil
+		return escapeString(t, `"`), nil
 	case int64, float64:
 		return fmt.Sprint(t), nil
 	case uint64:
@@ -210,9 +210,9 @@ func escapeObject(m map[string]interface{}) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		pairs = append(pairs, escapeString(k, "'")+":"+val)
+		pairs = append(pairs, escapeString(k, `"`)+":"+val)
 	}
-	return `"{` + strings.Join(pairs, ", ") + `}"`, nil
+	return `'{` + strings.Join(pairs, ", ") + `}'`, nil
 }
 
 func escapeObject2(m map[string]interface{}) (string, error) {
@@ -238,7 +238,7 @@ func escapeObject2(m map[string]interface{}) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		pairs = append(pairs, escapeString(k, "'")+":"+val)
+		pairs = append(pairs, escapeString(k, `"`)+":"+val)
 	}
 	return `{` + strings.Join(pairs, ", ") + `}`, nil
 }
