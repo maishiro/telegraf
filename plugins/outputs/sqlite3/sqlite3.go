@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,16 +20,35 @@ import (
 const MaxInt64 = int64(^uint64(0) >> 1)
 
 type SQLite3 struct {
-	File        string
-	Timeout     internal.Duration
-	Table       string
-	TableCreate bool `toml:"table_create"`
-	DB          *sql.DB
+	File            string
+	Timeout         internal.Duration
+	Table           string
+	TableCreate     bool `toml:"table_create"`
+	DefaultTagValue string
+	TagKeys         []string
+	DB              *sql.DB
+	DbFile          string
 }
 
 var sampleConfig = `
   # DB file 
-  file = "./test.db"
+  ## Index Config
+  ## The target index for metrics (Elasticsearch will create if it not exists).
+  ## You can use the date specifiers below to create indexes per time frame.
+  ## The metric timestamp will be used to decide the destination file name
+  # %Y - year (2016)
+  # %y - last two digits of year (00..99)
+  # %m - month (01..12)
+  # %d - day of month (e.g., 01)
+  # %H - hour (00..23)
+  # %V - week of the year (ISO week) (01..53)
+  ## Additionally, you can specify a tag name using the notation {{tag_name}}
+  ## which will be used as part of the index name. If the tag does not exist,
+  ## the default tag value will be used.
+  # index_name = "telegraf-{{host}}-%Y.%m.%d"
+  # default_tag_value = "none"
+  #file = "./test_%Y%m%d_%H00.db"
+  file = "./test_%Y%m%d.db" # required.
 
   # Timeout for all SQLite3 queries.
   timeout = "5s"
@@ -39,38 +59,96 @@ var sampleConfig = `
 `
 
 func (c *SQLite3) Connect() error {
-	var dbfile string
-	dbfile = c.File
-	db, err := sql.Open("sqlite3", dbfile)
-	if err != nil {
-		return err
-	} else if c.TableCreate {
-		sql := `
-CREATE TABLE IF NOT EXISTS ` + c.Table + ` (
-	"id" INTEGER PRIMARY KEY AUTOINCREMENT,
-	"timestamp" TEXT,
-	"name" TEXT,
-	"tags" json,
-	"fields" json
-);
-`
-		ctx, cancel := context.WithTimeout(context.Background(), c.Timeout.Duration)
-		defer cancel()
-		if _, err := db.ExecContext(ctx, sql); err != nil {
-			return err
-		}
+	if c.File == "" {
+		return fmt.Errorf("file_name is not defined")
 	}
-	c.DB = db
+
+	c.File, c.TagKeys = c.GetTagKeys(c.File)
+
+	// var dbfile string
+	// dbfile = c.File
+	// db, err := sql.Open("sqlite3", dbfile)
+	// if err != nil {
+	// 	return err
+	// } else if c.TableCreate {
+	// 	sql := `
+	// 		CREATE TABLE IF NOT EXISTS ` + c.Table + ` (
+	// 			"id" INTEGER PRIMARY KEY AUTOINCREMENT,
+	// 			"timestamp" TEXT,
+	// 			"name" TEXT,
+	// 			"tags" json,
+	// 			"fields" json
+	// 		);
+	// 	`
+	// 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout.Duration)
+	// 	defer cancel()
+	// 	if _, err := db.ExecContext(ctx, sql); err != nil {
+	// 		return err
+	// 	}
+	// }
+	// c.DB = db
+
 	return nil
 }
 
 func (c *SQLite3) Write(metrics []telegraf.Metric) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout.Duration)
 	defer cancel()
-	if sql, err := insertSQL(c.Table, metrics); err != nil {
-		return err
-	} else if _, err := c.DB.ExecContext(ctx, sql); err != nil {
-		return err
+
+	m := make(map[string][]telegraf.Metric)
+	for _, metric := range metrics {
+		fileName := c.GetFileName(c.File, metric.Time(), c.TagKeys, metric.Tags())
+		fmt.Printf("Write() fileName : [%s]", fileName)
+		m[fileName] = append(m[fileName], metric)
+	}
+
+	for k, mtrcs := range m {
+		fileName := k
+		//metric := mtrcs[0]
+
+		if sql1, err := insertSQL(c.Table, mtrcs); err != nil {
+			return err
+			//		} else if _, err := c.DB.ExecContext(ctx, sql); err != nil {
+		} else {
+
+			// fileName := c.GetFileName(c.File, metric.Time(), c.TagKeys, metric.Tags())
+			// fmt.Printf("Write() fileName : [%s]", fileName)
+
+			if c.DbFile != fileName {
+				//var dbfile string
+				//dbfile = c.File
+				db, err := sql.Open("sqlite3", fileName)
+				if err != nil {
+					return err
+				} else if c.TableCreate {
+					sql := `
+						CREATE TABLE IF NOT EXISTS ` + c.Table + ` (
+							"id" INTEGER PRIMARY KEY AUTOINCREMENT,
+							"timestamp" TEXT,
+							"name" TEXT,
+							"tags" json,
+							"fields" json
+						);
+					`
+					ctx, cancel := context.WithTimeout(context.Background(), c.Timeout.Duration)
+					defer cancel()
+					if _, err := db.ExecContext(ctx, sql); err != nil {
+						return err
+					}
+				}
+
+				if c.DB != nil {
+					c.DB.Close()
+				}
+
+				c.DB = db
+				c.DbFile = fileName
+			}
+
+			if _, err := c.DB.ExecContext(ctx, sql1); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -101,6 +179,74 @@ VALUES
 ` + strings.Join(rows, " ,\n") + `;`
 	fmt.Printf("insertSQL() [%s]", sql)
 	return sql, nil
+}
+
+func (a *SQLite3) GetTagKeys(indexName string) (string, []string) {
+
+	tagKeys := []string{}
+	startTag := strings.Index(indexName, "{{")
+
+	for startTag >= 0 {
+		endTag := strings.Index(indexName, "}}")
+
+		if endTag < 0 {
+			startTag = -1
+
+		} else {
+			tagName := indexName[startTag+2 : endTag]
+
+			var tagReplacer = strings.NewReplacer(
+				"{{"+tagName+"}}", "%s",
+			)
+
+			indexName = tagReplacer.Replace(indexName)
+			tagKeys = append(tagKeys, (strings.TrimSpace(tagName)))
+
+			startTag = strings.Index(indexName, "{{")
+		}
+	}
+
+	return indexName, tagKeys
+}
+
+func (a *SQLite3) GetFileName(indexName string, eventTime time.Time, tagKeys []string, metricTags map[string]string) string {
+	if strings.Contains(indexName, "%") {
+		var dateReplacer = strings.NewReplacer(
+			// "%Y", eventTime.UTC().Format("2006"),
+			// "%y", eventTime.UTC().Format("06"),
+			// "%m", eventTime.UTC().Format("01"),
+			// "%d", eventTime.UTC().Format("02"),
+			// "%H", eventTime.UTC().Format("15"),
+			// "%V", getISOWeek(eventTime.UTC()),
+			"%Y", eventTime.Format("2006"),
+			"%y", eventTime.Format("06"),
+			"%m", eventTime.Format("01"),
+			"%d", eventTime.Format("02"),
+			"%H", eventTime.Format("15"),
+			"%V", getISOWeek(eventTime),
+		)
+
+		indexName = dateReplacer.Replace(indexName)
+	}
+
+	tagValues := []interface{}{}
+
+	for _, key := range tagKeys {
+		if value, ok := metricTags[key]; ok {
+			tagValues = append(tagValues, value)
+		} else {
+			log.Printf("D! Tag '%s' not found, using '%s' on index name instead\n", key, a.DefaultTagValue)
+			tagValues = append(tagValues, a.DefaultTagValue)
+		}
+	}
+
+	return fmt.Sprintf(indexName, tagValues...)
+
+}
+
+func getISOWeek(eventTime time.Time) string {
+	_, week := eventTime.ISOWeek()
+	return strconv.Itoa(week)
 }
 
 // escapeValue returns a string version of val that is suitable for being used
