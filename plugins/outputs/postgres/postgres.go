@@ -19,18 +19,13 @@ import (
 const MaxInt64 = int64(^uint64(0) >> 1)
 
 type Postgres struct {
-	URL string
-	//	File            string
-	Timeout         internal.Duration
-	Table           string
-	TableName       string
-	TableCreate     bool `toml:"table_create"`
-	DefaultTagValue string
-	TagKeys         []string
-	DB              *sql.DB
-	//	DbFile          string
+	URL     string
+	Timeout internal.Duration
+	Table   string
 
-	Log telegraf.Logger
+	DB        *sql.DB
+	TableName string
+	Log       telegraf.Logger
 }
 
 var sampleConfig = `
@@ -42,43 +37,21 @@ var sampleConfig = `
   timeout = "5s"
   # Name of the table to store metrics in.
   table = "metrics"
-  # If true, and the metrics table does not exist, create it automatically.
-  table_create = true
 `
-// # DB file
-// ## Index Config
-// ## The target index for metrics (Elasticsearch will create if it not exists).
-// ## You can use the date specifiers below to create indexes per time frame.
-// ## The metric timestamp will be used to decide the destination file name
-// # %Y - year (2016)
-// # %y - last two digits of year (00..99)
-// # %m - month (01..12)
-// # %d - day of month (e.g., 01)
-// # %H - hour (00..23)
-// # %V - week of the year (ISO week) (01..53)
-// ## Additionally, you can specify a tag name using the notation {{tag_name}}
-// ## which will be used as part of the index name. If the tag does not exist,
-// ## the default tag value will be used.
-// # index_name = "telegraf-{{host}}-%Y.%m.%d"
-// # default_tag_value = "none"
-// #file = "./test_%Y%m%d_%H00.db"
-// file = "./test_%Y%m%d.db" # required.
 
 func (c *Postgres) Connect() error {
-	//	var dbfile string
-	//	dbfile = c.File
 	db, err := sql.Open("postgres", c.URL)
 	if err != nil {
 		return err
-	} else if c.TableCreate {
+	} else {
 		sql := `
-						CREATE TABLE IF NOT EXISTS ` + c.Table + ` (
-							datetime TIMESTAMP WITH TIME ZONE NOT NULL,
-							name TEXT NOT NULL,
-							tags JSONB NOT NULL,
-							fields JSONB NOT NULL
-						) PARTITION BY RANGE( datetime );
-`
+			CREATE TABLE IF NOT EXISTS ` + c.Table + ` (
+				datetime TIMESTAMP WITH TIME ZONE NOT NULL,
+				name TEXT NOT NULL,
+				tags JSONB NOT NULL,
+				fields JSONB NOT NULL
+			) PARTITION BY RANGE( datetime );`
+
 		c.Log.Debugf("D! [%s]", sql)
 		ctx, cancel := context.WithTimeout(context.Background(), c.Timeout.Duration)
 		defer cancel()
@@ -96,7 +69,7 @@ func (c *Postgres) Write(metrics []telegraf.Metric) error {
 
 	m := make(map[string][]telegraf.Metric)
 	for _, metric := range metrics {
-		tableName := c.GetTableName(c.Table, metric.Time(), c.TagKeys, metric.Tags())
+		tableName := c.GetTableName(c.Table, metric.Time(), []string{}, metric.Tags())
 		fmt.Printf("Write() tableName : [%s]", tableName)
 		m[tableName] = append(m[tableName], metric)
 	}
@@ -114,12 +87,6 @@ func (c *Postgres) Write(metrics []telegraf.Metric) error {
 			// fmt.Printf("Write() fileName : [%s]", fileName)
 
 			if c.TableName != tableName {
-				//var dbfile string
-				//dbfile = c.File
-				//db, err := sql.Open("sqlite3", fileName)
-				//if err != nil {
-				//	return err
-				//} else if c.TableCreate {
 				sql := `CREATE TABLE IF NOT EXISTS ` + tableName + ` PARTITION OF ` + c.Table +
 					` FOR VALUES FROM ('` + metric.Time().Format("2006-01-02") + `') TO ('` + metric.Time().Add(time.Duration(24)*time.Hour).Format("2006-01-02") + `');`
 				fmt.Printf("Write() [%s]", sql)
@@ -130,13 +97,7 @@ func (c *Postgres) Write(metrics []telegraf.Metric) error {
 				if _, err := c.DB.ExecContext(ctx, sql); err != nil {
 					return err
 				}
-				//}
 
-				//if c.DB != nil {
-				//	c.DB.Close()
-				//}
-				//
-				//c.DB = db
 				c.TableName = tableName
 			}
 
@@ -148,21 +109,6 @@ func (c *Postgres) Write(metrics []telegraf.Metric) error {
 
 	return nil
 }
-
-// func (c *Postgres) Write(metrics []telegraf.Metric) error {
-// 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout.Duration)
-// 	defer cancel()
-
-// 	var sql string
-// 	if sql, err := insertSQL(c.Table, metrics); err != nil {
-// 		return err
-// 	} else if _, err := c.DB.ExecContext(ctx, sql); err != nil {
-// 		c.Log.Errorf("D! [%s]", sql)
-// 		return err
-// 	}
-// 	c.Log.Debugf("D! [%s]", sql)
-// 	return nil
-// }
 
 func insertSQL(table string, metrics []telegraf.Metric) (string, error) {
 	rows := make([]string, len(metrics))
@@ -186,44 +132,13 @@ func insertSQL(table string, metrics []telegraf.Metric) (string, error) {
 		rows[i] = `(` + strings.Join(escapedCols, ", ") + `)`
 	}
 	sql := `INSERT INTO ` + table + ` (datetime, name, tags, fields)
-VALUES
-` + strings.Join(rows, " ,\n") + `;`
+	VALUES
+	` + strings.Join(rows, " ,\n") + `;`
 	fmt.Printf("insertSQL() [%s]", sql)
 	return sql, nil
 }
 
 func (a *Postgres) GetTableName(indexName string, eventTime time.Time, tagKeys []string, metricTags map[string]string) string {
-	// if strings.Contains(indexName, "%") {
-	// 	var dateReplacer = strings.NewReplacer(
-	// 		// "%Y", eventTime.UTC().Format("2006"),
-	// 		// "%y", eventTime.UTC().Format("06"),
-	// 		// "%m", eventTime.UTC().Format("01"),
-	// 		// "%d", eventTime.UTC().Format("02"),
-	// 		// "%H", eventTime.UTC().Format("15"),
-	// 		// "%V", getISOWeek(eventTime.UTC()),
-	// 		"%Y", eventTime.Format("2006"),
-	// 		"%y", eventTime.Format("06"),
-	// 		"%m", eventTime.Format("01"),
-	// 		"%d", eventTime.Format("02"),
-	// 		"%H", eventTime.Format("15"),
-	// 		"%V", getISOWeek(eventTime),
-	// 	)
-
-	// 	indexName = dateReplacer.Replace(indexName)
-	// }
-
-	// tagValues := []interface{}{}
-
-	// for _, key := range tagKeys {
-	// 	if value, ok := metricTags[key]; ok {
-	// 		tagValues = append(tagValues, value)
-	// 	} else {
-	// 		log.Printf("D! Tag '%s' not found, using '%s' on index name instead\n", key, a.DefaultTagValue)
-	// 		tagValues = append(tagValues, a.DefaultTagValue)
-	// 	}
-	// }
-
-	// return fmt.Sprintf(indexName, tagValues...)
 	return indexName + "_" + eventTime.Format("20060102")
 }
 
