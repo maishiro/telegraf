@@ -232,7 +232,7 @@ func (p *Parser) parseQuery(starttime time.Time, doc, selected dataNode, config 
 			return nil, fmt.Errorf("failed to query timestamp: %v", err)
 		}
 		if v != nil {
-			timestamp, err = internal.ParseTimestamp(config.TimestampFmt, v, "")
+			timestamp, err = internal.ParseTimestamp(config.TimestampFmt, v, config.TimestampTimezone)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse timestamp: %w", err)
 			}

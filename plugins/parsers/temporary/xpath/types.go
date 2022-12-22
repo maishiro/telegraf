@@ -11,6 +11,7 @@ type Config struct {
 	Selection    string            `toml:"metric_selection"`
 	Timestamp    string            `toml:"timestamp"`
 	TimestampFmt string            `toml:"timestamp_format"`
+	TimestampTimezone string       `toml:"timestamp_timezone"`
 	Tags         map[string]string `toml:"tags"`
 	Fields       map[string]string `toml:"fields"`
 	FieldsInt    map[string]string `toml:"fields_int"`
