@@ -167,21 +167,21 @@ require (
 	github.com/xdg/scram v1.0.5
 	github.com/yuin/goldmark v1.5.3
 	go.mongodb.org/mongo-driver v1.11.0
-	go.opentelemetry.io/collector/pdata v1.0.0-rc1
+	go.opentelemetry.io/collector/pdata v1.0.0-rc4
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v0.32.1
 	go.opentelemetry.io/otel/sdk/metric v0.32.1
 	go.starlark.net v0.0.0-20220328144851-d1966c6b9fcd
 	golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4
-	golang.org/x/net v0.4.0
+	golang.org/x/net v0.5.0
 	golang.org/x/oauth2 v0.3.0
 	golang.org/x/sync v0.1.0
-	golang.org/x/sys v0.3.0
-	golang.org/x/text v0.5.0
+	golang.org/x/sys v0.4.0
+	golang.org/x/text v0.6.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20211230205640-daad0b7ba671
 	gonum.org/v1/gonum v0.12.0
 	google.golang.org/api v0.104.0
 	google.golang.org/genproto v0.0.0-20221207170731-23e4bf6bdc37
-	google.golang.org/grpc v1.51.0
+	google.golang.org/grpc v1.52.0
 	google.golang.org/protobuf v1.28.1
 	gopkg.in/gorethink/gorethink.v3 v3.0.5
 	gopkg.in/olivere/elastic.v5 v5.0.86
@@ -410,11 +410,11 @@ require (
 	go.opentelemetry.io/otel/trace v1.10.0 // indirect
 	go.opentelemetry.io/proto/otlp v0.19.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
-	go.uber.org/multierr v1.8.0 // indirect
+	go.uber.org/multierr v1.9.0 // indirect
 	go.uber.org/zap v1.22.0 // indirect
 	golang.org/x/crypto v0.0.0-20220926161630-eccd6366d1be // indirect
 	golang.org/x/exp v0.0.0-20200513190911-00229845015e // indirect
-	golang.org/x/term v0.3.0
+	golang.org/x/term v0.4.0
 	golang.org/x/time v0.1.0 // indirect
 	golang.org/x/tools v0.1.12 // indirect
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
