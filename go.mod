@@ -169,7 +169,7 @@ require (
 	github.com/xdg/scram v1.0.5
 	github.com/yuin/goldmark v1.5.3
 	go.mongodb.org/mongo-driver v1.11.1
-	go.opentelemetry.io/collector/pdata v1.0.0-rc4
+	go.opentelemetry.io/collector/pdata v1.0.0-rc5
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v0.35.0
 	go.opentelemetry.io/otel/sdk/metric v0.35.0
 	go.starlark.net v0.0.0-20220328144851-d1966c6b9fcd
