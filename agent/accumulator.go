@@ -1,21 +1,16 @@
 package agent
 
 import (
-	"log"
 	"time"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/metric"
-	"github.com/influxdata/telegraf/selfstat"
-)
-
-var (
-	NErrors = selfstat.Register("agent", "gather_errors", map[string]string{})
 )
 
 type MetricMaker interface {
 	LogName() string
-	MakeMetric(metric telegraf.Metric) telegraf.Metric
+	MakeMetric(m telegraf.Metric) telegraf.Metric
+	Log() telegraf.Logger
 }
 
 type accumulator struct {
@@ -42,7 +37,7 @@ func (ac *accumulator) AddFields(
 	tags map[string]string,
 	t ...time.Time,
 ) {
-	ac.addFields(measurement, tags, fields, telegraf.Untyped, t...)
+	ac.addMeasurement(measurement, tags, fields, telegraf.Untyped, t...)
 }
 
 func (ac *accumulator) AddGauge(
@@ -51,7 +46,7 @@ func (ac *accumulator) AddGauge(
 	tags map[string]string,
 	t ...time.Time,
 ) {
-	ac.addFields(measurement, tags, fields, telegraf.Gauge, t...)
+	ac.addMeasurement(measurement, tags, fields, telegraf.Gauge, t...)
 }
 
 func (ac *accumulator) AddCounter(
@@ -60,7 +55,7 @@ func (ac *accumulator) AddCounter(
 	tags map[string]string,
 	t ...time.Time,
 ) {
-	ac.addFields(measurement, tags, fields, telegraf.Counter, t...)
+	ac.addMeasurement(measurement, tags, fields, telegraf.Counter, t...)
 }
 
 func (ac *accumulator) AddSummary(
@@ -69,7 +64,7 @@ func (ac *accumulator) AddSummary(
 	tags map[string]string,
 	t ...time.Time,
 ) {
-	ac.addFields(measurement, tags, fields, telegraf.Summary, t...)
+	ac.addMeasurement(measurement, tags, fields, telegraf.Summary, t...)
 }
 
 func (ac *accumulator) AddHistogram(
@@ -78,7 +73,7 @@ func (ac *accumulator) AddHistogram(
 	tags map[string]string,
 	t ...time.Time,
 ) {
-	ac.addFields(measurement, tags, fields, telegraf.Histogram, t...)
+	ac.addMeasurement(measurement, tags, fields, telegraf.Histogram, t...)
 }
 
 func (ac *accumulator) AddMetric(m telegraf.Metric) {
@@ -88,17 +83,14 @@ func (ac *accumulator) AddMetric(m telegraf.Metric) {
 	}
 }
 
-func (ac *accumulator) addFields(
+func (ac *accumulator) addMeasurement(
 	measurement string,
 	tags map[string]string,
 	fields map[string]interface{},
 	tp telegraf.ValueType,
 	t ...time.Time,
 ) {
-	m, err := metric.New(measurement, tags, fields, ac.getTime(t), tp)
-	if err != nil {
-		return
-	}
+	m := metric.New(measurement, tags, fields, ac.getTime(t), tp)
 	if m := ac.maker.MakeMetric(m); m != nil {
 		ac.metrics <- m
 	}
@@ -110,8 +102,7 @@ func (ac *accumulator) AddError(err error) {
 	if err == nil {
 		return
 	}
-	NErrors.Incr(1)
-	log.Printf("E! [%s] Error in plugin: %v", ac.maker.LogName(), err)
+	ac.maker.Log().Errorf("Error in plugin: %v", err)
 }
 
 func (ac *accumulator) SetPrecision(precision time.Duration) {

@@ -1,135 +1,162 @@
-# Telegraf [![Circle CI](https://circleci.com/gh/influxdata/telegraf.svg?style=svg)](https://circleci.com/gh/influxdata/telegraf) [![Docker pulls](https://img.shields.io/docker/pulls/library/telegraf.svg)](https://hub.docker.com/_/telegraf/)
 
-Telegraf is an agent for collecting, processing, aggregating, and writing metrics.
+# Telegraf
 
-Design goals are to have a minimal memory footprint with a plugin system so
-that developers in the community can easily add support for collecting
-metrics.
+![tiger](assets/TelegrafTiger.png "tiger")
 
-Telegraf is plugin-driven and has the concept of 4 distinct plugin types:
+[![Contribute](https://img.shields.io/badge/Contribute%20To%20Telegraf-orange.svg?logo=influx&style=for-the-badge)](https://github.com/influxdata/telegraf/blob/master/CONTRIBUTING.md) [![Slack Status](https://img.shields.io/badge/slack-join_chat-white.svg?logo=slack&style=for-the-badge)](https://www.influxdata.com/slack) [![Circle CI](https://circleci.com/gh/influxdata/telegraf.svg?style=svg)](https://circleci.com/gh/influxdata/telegraf) [![GoDoc](https://godoc.org/github.com/influxdata/telegraf?status.svg)](https://godoc.org/github.com/influxdata/telegraf) [![Docker pulls](https://img.shields.io/docker/pulls/library/telegraf.svg)](https://hub.docker.com/_/telegraf/) [![Go Report Card](https://goreportcard.com/badge/github.com/influxdata/telegraf)](https://goreportcard.com/report/github.com/influxdata/telegraf)
 
-1. [Input Plugins](#input-plugins) collect metrics from the system, services, or 3rd party APIs
-2. [Processor Plugins](#processor-plugins) transform, decorate, and/or filter metrics
-3. [Aggregator Plugins](#aggregator-plugins) create aggregate metrics (e.g. mean, min, max, quantiles, etc.)
-4. [Output Plugins](#output-plugins) write metrics to various destinations
+Telegraf is an agent for collecting, processing, aggregating, and writing metrics. Based on a
+plugin system to enable developers in the community to easily add support for additional
+metric collection. There are four distinct types of plugins:
 
-New plugins are designed to be easy to contribute, pull requests are welcomed
-and we work to incorporate as many pull requests as possible.
+1. [Input Plugins](/docs/INPUTS.md) collect metrics from the system, services, or 3rd party APIs
+2. [Processor Plugins](/docs/PROCESSORS.md) transform, decorate, and/or filter metrics
+3. [Aggregator Plugins](/docs/AGGREGATORS.md) create aggregate metrics (e.g. mean, min, max, quantiles, etc.)
+4. [Output Plugins](/docs/OUTPUTS.md) write metrics to various destinations
 
-## Try in Browser :rocket:
+New plugins are designed to be easy to contribute, pull requests are welcomed, and we work to
+incorporate as many pull requests as possible. Consider looking at the
+[list of external plugins](EXTERNAL_PLUGINS.md) as well.
 
-You can try Telegraf right in your browser in the [Telegraf playground](https://rootnroll.com/d/telegraf/).
+## Minimum Requirements
 
-## Contributing
+Telegraf shares the same [minimum requirements][] as Go:
 
-There are many ways to contribute:
-- Fix and [report bugs](https://github.com/influxdata/telegraf/issues/new)
-- [Improve documentation](https://github.com/influxdata/telegraf/issues?q=is%3Aopen+label%3Adocumentation)
-- [Review code and feature proposals](https://github.com/influxdata/telegraf/pulls)
-- Answer questions and discuss here on github and on the [Community Site](https://community.influxdata.com/)
-- [Contribute plugins](CONTRIBUTING.md)
+- Linux kernel version 2.6.23 or later
+- Windows 7 or later
+- FreeBSD 11.2 or later
+- MacOS 10.11 El Capitan or later
 
-## Installation:
+[minimum requirements]: https://github.com/golang/go/wiki/MinimumRequirements#minimum-requirements
 
-You can download the binaries directly from the [downloads](https://www.influxdata.com/downloads) page
-or from the [releases](https://github.com/influxdata/telegraf/releases) section.
+## Obtaining Telegraf
 
-### Ansible Role:
+View the [changelog](/CHANGELOG.md) for the latest updates and changes by version.
 
-Ansible role: https://github.com/rossmcdonald/telegraf
+### Binary Downloads
 
-### From Source:
+Binary downloads are available from the [InfluxData downloads](https://www.influxdata.com/downloads)
+page or from each [GitHub Releases](https://github.com/influxdata/telegraf/releases) page.
 
-Telegraf requires golang version 1.12 or newer, the Makefile requires GNU make.
+### Package Repository
 
-1. [Install Go](https://golang.org/doc/install) >=1.12 (1.13 recommended)
-2. [Install dep](https://golang.github.io/dep/docs/installation.html) ==v0.5.0
-3. Download Telegraf source:
+InfluxData also provides a package repo that contains both DEB and RPM downloads.
+
+For deb-based platforms (e.g. Ubuntu and Debian) run the following to add the
+repo key and setup a new sources.list entry:
+
+```shell
+# influxdata-archive_compat.key GPG fingerprint:
+#     9D53 9D90 D332 8DC7 D6C8 D3B9 D8FF 8E1F 7DF8 B07E
+wget -q https://repos.influxdata.com/influxdata-archive_compat.key
+echo '393e8779c89ac8d958f81f942f9ad7fb82a25e133faddaf92e15b16e6ac9ce4c influxdata-archive_compat.key' | sha256sum -c && cat influxdata-archive_compat.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
+echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | sudo tee /etc/apt/sources.list.d/influxdata.list
+sudo apt-get update && sudo apt-get install telegraf
+```
+
+For RPM-based platforms (e.g. RHEL, CentOS) use the following to create a repo
+file and install telegraf:
+
+```shell
+# influxdata-archive_compat.key GPG fingerprint:
+#     9D53 9D90 D332 8DC7 D6C8 D3B9 D8FF 8E1F 7DF8 B07E
+cat <<EOF | sudo tee /etc/yum.repos.d/influxdata.repo
+[influxdata]
+name = InfluxData Repository - Stable
+baseurl = https://repos.influxdata.com/stable/\$basearch/main
+enabled = 1
+gpgcheck = 1
+gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key
+EOF
+sudo yum install telegraf
+```
+
+### Build From Source
+
+Telegraf requires Go version 1.18 or newer, the Makefile requires GNU make.
+
+On Windows, the makefile requires the use of a bash terminal to support all makefile targets.
+An easy option to get bash for windows is using the version that comes with [git for windows](https://gitforwindows.org/).
+
+1. [Install Go](https://golang.org/doc/install) >=1.18 (1.18.0 recommended)
+2. Clone the Telegraf repository:
+
+   ```shell
+   git clone https://github.com/influxdata/telegraf.git
    ```
-   go get -d github.com/influxdata/telegraf
-   ```
-4. Run make from the source directory
-   ```
-   cd "$HOME/go/src/github.com/influxdata/telegraf"
-   make
-   ```
 
-### Changelog
+3. Run `make build` from the source directory
 
-View the [changelog](/CHANGELOG.md) for the latest updates and changes by
-version.
+   ```shell
+   cd telegraf
+   make build
+   ```
 
 ### Nightly Builds
 
-These builds are generated from the master branch:
-- [telegraf-nightly_darwin_amd64.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_darwin_amd64.tar.gz)
-- [telegraf_nightly_amd64.deb](https://dl.influxdata.com/telegraf/nightlies/telegraf_nightly_amd64.deb)
-- [telegraf_nightly_arm64.deb](https://dl.influxdata.com/telegraf/nightlies/telegraf_nightly_arm64.deb)
-- [telegraf-nightly.arm64.rpm](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly.arm64.rpm)
-- [telegraf_nightly_armel.deb](https://dl.influxdata.com/telegraf/nightlies/telegraf_nightly_armel.deb)
-- [telegraf-nightly.armel.rpm](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly.armel.rpm)
-- [telegraf_nightly_armhf.deb](https://dl.influxdata.com/telegraf/nightlies/telegraf_nightly_armhf.deb)
-- [telegraf-nightly.armv6hl.rpm](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly.armv6hl.rpm)
-- [telegraf-nightly_freebsd_amd64.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_freebsd_amd64.tar.gz)
-- [telegraf-nightly_freebsd_i386.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_freebsd_i386.tar.gz)
-- [telegraf_nightly_i386.deb](https://dl.influxdata.com/telegraf/nightlies/telegraf_nightly_i386.deb)
-- [telegraf-nightly.i386.rpm](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly.i386.rpm)
-- [telegraf-nightly_linux_amd64.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_linux_amd64.tar.gz)
-- [telegraf-nightly_linux_arm64.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_linux_arm64.tar.gz)
-- [telegraf-nightly_linux_armel.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_linux_armel.tar.gz)
-- [telegraf-nightly_linux_armhf.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_linux_armhf.tar.gz)
-- [telegraf-nightly_linux_i386.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_linux_i386.tar.gz)
-- [telegraf-nightly_linux_s390x.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_linux_s390x.tar.gz)
-- [telegraf_nightly_s390x.deb](https://dl.influxdata.com/telegraf/nightlies/telegraf_nightly_s390x.deb)
-- [telegraf-nightly.s390x.rpm](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly.s390x.rpm)
-- [telegraf-nightly_windows_amd64.zip](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_windows_amd64.zip)
-- [telegraf-nightly_windows_i386.zip](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly_windows_i386.zip)
-- [telegraf-nightly.x86_64.rpm](https://dl.influxdata.com/telegraf/nightlies/telegraf-nightly.x86_64.rpm)
-- [telegraf-static-nightly_linux_amd64.tar.gz](https://dl.influxdata.com/telegraf/nightlies/telegraf-static-nightly_linux_amd64.tar.gz)
+[Nightly](/docs/NIGHTLIES.md) builds are available, generated from the master branch.
 
-## How to use it:
+### 3rd Party Builds
+
+Builds for other platforms or package formats are provided by members of theTelegraf community.
+These packages are not built, tested, or supported by the Telegraf project or InfluxData. Please
+get in touch with the package author if support is needed:
+
+- [Ansible Role](https://github.com/rossmcdonald/telegraf)
+- [Chocolatey](https://chocolatey.org/packages/telegraf) by [ripclawffb](https://chocolatey.org/profiles/ripclawffb)
+- [Scoop](https://github.com/ScoopInstaller/Main/blob/master/bucket/telegraf.json)
+- [Snap](https://snapcraft.io/telegraf) by Laurent Sesquès (sajoupa)
+- [Homebrew](https://formulae.brew.sh/formula/telegraf#default)
+
+## Getting Started
 
 See usage with:
 
-```
+```shell
 telegraf --help
 ```
 
-#### Generate a telegraf config file:
+### Generate a telegraf config file
 
-```
+```shell
 telegraf config > telegraf.conf
 ```
 
-#### Generate config with only cpu input & influxdb output plugins defined:
+### Generate config with only cpu input & influxdb output plugins defined
 
-```
-telegraf --input-filter cpu --output-filter influxdb config
+```shell
+telegraf config --section-filter agent:inputs:outputs --input-filter cpu --output-filter influxdb
 ```
 
-#### Run a single telegraf collection, outputing metrics to stdout:
+### Run a single telegraf collection, outputting metrics to stdout
 
-```
+```shell
 telegraf --config telegraf.conf --test
 ```
 
-#### Run telegraf with all plugins defined in config file:
+### Run telegraf with all plugins defined in config file
 
-```
+```shell
 telegraf --config telegraf.conf
 ```
 
-#### Run telegraf, enabling the cpu & memory input, and influxdb output plugins:
+### Run telegraf, enabling the cpu & memory input, and influxdb output plugins
 
-```
+```shell
 telegraf --config telegraf.conf --input-filter cpu:mem --output-filter influxdb
 ```
 
+## Contribute to the Project
+
+Telegraf is an MIT licensed open source project and we love our community. The fastest way to get something fixed is to open a PR. Check out our [contributing guide](CONTRIBUTING.md) if you're interested in helping out. Also, join us on our [Community Slack](https://influxdata.com/slack) or [Community Page](https://community.influxdata.com/) if you have questions or comments for our engineering teams.
+
+If your completely new to Telegraf and InfluxDB, you can also enroll for free at [InfluxDB university](https://www.influxdata.com/university/) to take courses to learn more.
+
 ## Documentation
 
-[Latest Release Documentation][release docs].
+[Latest Release Documentation](https://docs.influxdata.com/telegraf/latest/)
 
-For documentation on the latest development code see the [documentation index][devel docs].
+For documentation on the latest development code see the [documentation index](/docs).
 
 [release docs]: https://docs.influxdata.com/telegraf
 [devel docs]: docs
@@ -400,3 +427,7 @@ For documentation on the latest development code see the [documentation index][d
 * [tcp](./plugins/outputs/socket_writer)
 * [udp](./plugins/outputs/socket_writer)
 * [wavefront](./plugins/outputs/wavefront)
+- [Input Plugins](/docs/INPUTS.md)
+- [Output Plugins](/docs/OUTPUTS.md)
+- [Processor Plugins](/docs/PROCESSORS.md)
+- [Aggregator Plugins](/docs/AGGREGATORS.md)

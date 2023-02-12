@@ -7,12 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/influxdata/telegraf/testutil"
 )
 
 type statServer struct{}
@@ -25,13 +27,15 @@ func (s statServer) serverSocket(l net.Listener) {
 		}
 
 		go func(c net.Conn) {
+			defer c.Close()
+
 			buf := make([]byte, 1024)
 			n, _ := c.Read(buf)
 
 			data := buf[:n]
 			if string(data) == "show stat\n" {
-				c.Write([]byte(csvOutputSample))
-				c.Close()
+				//nolint:errcheck,revive // we return anyway
+				c.Write(csvOutputSample)
 			}
 		}(conn)
 	}
@@ -43,15 +47,18 @@ func TestHaproxyGeneratesMetricsWithAuthentication(t *testing.T) {
 		username, password, ok := r.BasicAuth()
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, "Unauthorized")
+			_, err := fmt.Fprint(w, "Unauthorized")
+			require.NoError(t, err)
 			return
 		}
 
 		if username == "user" && password == "password" {
-			fmt.Fprint(w, csvOutputSample)
+			_, err := fmt.Fprint(w, string(csvOutputSample))
+			require.NoError(t, err)
 		} else {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, "Unauthorized")
+			_, err := fmt.Fprint(w, "Unauthorized")
+			require.NoError(t, err)
 		}
 	}))
 	defer ts.Close()
@@ -81,13 +88,14 @@ func TestHaproxyGeneratesMetricsWithAuthentication(t *testing.T) {
 		Servers: []string{ts.URL},
 	}
 
-	r.Gather(&acc)
+	require.NoError(t, r.Gather(&acc))
 	require.NotEmpty(t, acc.Errors)
 }
 
 func TestHaproxyGeneratesMetricsWithoutAuthentication(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, csvOutputSample)
+		_, err := fmt.Fprint(w, string(csvOutputSample))
+		require.NoError(t, err)
 	}))
 	defer ts.Close()
 
@@ -97,8 +105,7 @@ func TestHaproxyGeneratesMetricsWithoutAuthentication(t *testing.T) {
 
 	var acc testutil.Accumulator
 
-	err := r.Gather(&acc)
-	require.NoError(t, err)
+	require.NoError(t, r.Gather(&acc))
 
 	tags := map[string]string{
 		"server": ts.Listener.Addr().String(),
@@ -114,12 +121,13 @@ func TestHaproxyGeneratesMetricsWithoutAuthentication(t *testing.T) {
 func TestHaproxyGeneratesMetricsUsingSocket(t *testing.T) {
 	var randomNumber int64
 	var sockets [5]net.Listener
-	_globmask := "/tmp/test-haproxy*.sock"
-	_badmask := "/tmp/test-fail-haproxy*.sock"
+
+	_globmask := filepath.Join(os.TempDir(), "test-haproxy*.sock")
+	_badmask := filepath.Join(os.TempDir(), "test-fail-haproxy*.sock")
 
 	for i := 0; i < 5; i++ {
-		binary.Read(rand.Reader, binary.LittleEndian, &randomNumber)
-		sockname := fmt.Sprintf("/tmp/test-haproxy%d.sock", randomNumber)
+		require.NoError(t, binary.Read(rand.Reader, binary.LittleEndian, &randomNumber))
+		sockname := filepath.Join(os.TempDir(), fmt.Sprintf("test-haproxy%d.sock", randomNumber))
 
 		sock, err := net.Listen("unix", sockname)
 		if err != nil {
@@ -127,7 +135,7 @@ func TestHaproxyGeneratesMetricsUsingSocket(t *testing.T) {
 		}
 
 		sockets[i] = sock
-		defer sock.Close()
+		defer sock.Close() //nolint:revive // done on purpose, closing will be executed properly
 
 		s := statServer{}
 		go s.serverSocket(sock)
@@ -146,7 +154,7 @@ func TestHaproxyGeneratesMetricsUsingSocket(t *testing.T) {
 
 	for _, sock := range sockets {
 		tags := map[string]string{
-			"server": sock.Addr().String(),
+			"server": getSocketAddr(sock.Addr().String()),
 			"proxy":  "git",
 			"sv":     "www",
 			"type":   "server",
@@ -158,12 +166,12 @@ func TestHaproxyGeneratesMetricsUsingSocket(t *testing.T) {
 	// This mask should not match any socket
 	r.Servers = []string{_badmask}
 
-	r.Gather(&acc)
+	require.NoError(t, r.Gather(&acc))
 	require.NotEmpty(t, acc.Errors)
 }
 
-//When not passing server config, we default to localhost
-//We just want to make sure we did request stat from localhost
+// When not passing server config, we default to localhost
+// We just want to make sure we did request stat from localhost
 func TestHaproxyDefaultGetFromLocalhost(t *testing.T) {
 	r := &haproxy{}
 
@@ -171,12 +179,13 @@ func TestHaproxyDefaultGetFromLocalhost(t *testing.T) {
 
 	err := r.Gather(&acc)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "127.0.0.1:1936/haproxy?stats/;csv")
+	require.Contains(t, err.Error(), "127.0.0.1:1936/haproxy?stats/;csv")
 }
 
 func TestHaproxyKeepFieldNames(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, csvOutputSample)
+		_, err := fmt.Fprint(w, string(csvOutputSample))
+		require.NoError(t, err)
 	}))
 	defer ts.Close()
 
@@ -187,8 +196,7 @@ func TestHaproxyKeepFieldNames(t *testing.T) {
 
 	var acc testutil.Accumulator
 
-	err := r.Gather(&acc)
-	require.NoError(t, err)
+	require.NoError(t, r.Gather(&acc))
 
 	tags := map[string]string{
 		"server": ts.Listener.Addr().String(),
@@ -220,6 +228,16 @@ func TestHaproxyKeepFieldNames(t *testing.T) {
 	delete(fields, "http_response.other")
 
 	acc.AssertContainsTaggedFields(t, "haproxy", fields, tags)
+}
+
+func mustReadSampleOutput() []byte {
+	filePath := "testdata/sample_output.csv"
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		panic(fmt.Errorf("could not read from file %s: %w", filePath, err))
+	}
+
+	return data
 }
 
 func HaproxyGetFieldValues() map[string]interface{} {
@@ -277,19 +295,4 @@ func HaproxyGetFieldValues() map[string]interface{} {
 }
 
 // Can obtain from official haproxy demo: 'http://demo.haproxy.org/;csv'
-const csvOutputSample = `
-# pxname,svname,qcur,qmax,scur,smax,slim,stot,bin,bout,dreq,dresp,ereq,econ,eresp,wretr,wredis,status,weight,act,bck,chkfail,chkdown,lastchg,downtime,qlimit,pid,iid,sid,throttle,lbtot,tracked,type,rate,rate_lim,rate_max,check_status,check_code,check_duration,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,hanafail,req_rate,req_rate_max,req_tot,cli_abrt,srv_abrt,comp_in,comp_out,comp_byp,comp_rsp,lastsess,last_chk,last_agt,qtime,ctime,rtime,ttime,agent_status,agent_code,agent_duration,check_desc,agent_desc,check_rise,check_fall,check_health,agent_rise,agent_fall,agent_health,addr,cookie,mode,algo,conn_rate,conn_rate_max,conn_tot,intercepted,dcon,dses,
-http-in,FRONTEND,,,3,100,100,2639994,813557487,65937668635,505252,0,47567,,,,,OPEN,,,,,,,,,1,2,0,,,,0,1,0,157,,,,0,1514640,606647,136264,496535,14948,,1,155,2754255,,,36370569635,17435137766,0,642264,,,,,,,,,,,,,,,,,,,,,http,,1,157,2649922,339471,0,0,
-http-in,IPv4-direct,,,3,41,100,349801,57445827,1503928881,269899,0,287,,,,,OPEN,,,,,,,,,1,2,1,,,,3,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,http,,,,,,0,0,
-http-in,IPv4-cached,,,0,33,100,1786155,644395819,57905460294,60511,0,1,,,,,OPEN,,,,,,,,,1,2,2,,,,3,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,http,,,,,,0,0,
-http-in,IPv6-direct,,,0,100,100,325619,92414745,6205208728,3399,0,47279,,,,,OPEN,,,,,,,,,1,2,3,,,,3,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,http,,,,,,0,0,
-http-in,local,,,0,0,100,0,0,0,0,0,0,,,,,OPEN,,,,,,,,,1,2,4,,,,3,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,http,,,,,,0,0,
-http-in,local-https,,,0,5,100,188347,19301096,323070732,171443,0,0,,,,,OPEN,,,,,,,,,1,2,5,,,,3,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,http,,,,,,0,0,
-www,www,0,0,0,20,20,1719698,672044109,64806076656,,0,,0,5285,22,0,UP,1,1,0,561,84,1036557,3356,,1,3,1,,1715117,,2,0,,45,L7OK,200,5,671,1144889,481714,87038,4,0,,,,,105016,167,,,,,5,OK,,0,5,16,1167,,,,Layer7 check passed,,2,3,4,,,,,,http,,,,,,,,
-www,bck,0,0,0,10,10,1483,537137,7544118,,0,,0,0,0,0,UP,1,0,1,4,0,5218087,0,,1,3,2,,1371,,2,0,,17,L7OK,200,2,0,629,99,755,0,0,,,,,16,0,,,,,1036557,OK,,756,1,13,1184,,,,Layer7 check passed,,2,5,6,,,,,,http,,,,,,,,
-www,BACKEND,0,25,0,46,100,1721835,674684790,64813732170,314,0,,130,5285,22,0,UP,1,1,1,,0,5218087,0,,1,3,0,,1716488,,1,0,,45,,,,0,1145518,481813,88664,5719,121,,,,1721835,105172,167,35669268059,17250148556,0,556042,5,,,0,5,16,1167,,,,,,,,,,,,,,http,,,,,,,,
-git,www,0,0,0,2,2,14539,5228218,303747244,,0,,0,21,0,0,UP,1,1,0,559,84,1036557,3352,,1,4,1,,9481,,2,0,,2,L7OK,200,3,0,5668,8710,140,0,0,,,,,690,0,,,,,1342,OK,,1268,1,2908,4500,,,,Layer7 check passed,,2,3,4,,,,,,http,,,,,,,,
-git,bck,0,0,0,0,2,0,0,0,,0,,0,0,0,0,UP,1,0,1,2,0,5218087,0,,1,4,2,,0,,2,0,,0,L7OK,200,2,0,0,0,0,0,0,,,,,0,0,,,,,-1,OK,,0,0,0,0,,,,Layer7 check passed,,2,3,4,,,,,,http,,,,,,,,
-git,BACKEND,0,6,0,8,2,14541,8082393,303747668,0,0,,2,21,0,0,UP,1,1,1,,0,5218087,0,,1,4,0,,9481,,1,0,,7,,,,0,5668,8710,140,23,0,,,,14541,690,0,133458298,38104818,0,4379,1342,,,1268,1,2908,4500,,,,,,,,,,,,,,http,,,,,,,,
-demo,BACKEND,0,0,1,5,20,24063,7876647,659864417,48,0,,1,0,0,0,UP,0,0,0,,0,5218087,,,1,17,0,,0,,1,1,,26,,,,0,23983,21,0,1,57,,,,24062,111,0,567843278,146884392,0,1083,0,,,2706,0,0,887,,,,,,,,,,,,,,http,,,,,,,,
-`
+var csvOutputSample = mustReadSampleOutput()

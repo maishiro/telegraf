@@ -1,53 +1,43 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package nats
 
 import (
+	_ "embed"
 	"fmt"
-	"log"
+	"strings"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/serializers"
-	nats_client "github.com/nats-io/go-nats"
 )
 
+//go:embed sample.conf
+var sampleConfig string
+
 type NATS struct {
-	Servers  []string `toml:"servers"`
-	Secure   bool     `toml:"secure"`
-	Username string   `toml:"username"`
-	Password string   `toml:"password"`
-	Subject  string   `toml:"subject"`
+	Servers     []string      `toml:"servers"`
+	Secure      bool          `toml:"secure"`
+	Name        string        `toml:"name"`
+	Username    config.Secret `toml:"username"`
+	Password    config.Secret `toml:"password"`
+	Credentials string        `toml:"credentials"`
+	Subject     string        `toml:"subject"`
+
 	tls.ClientConfig
 
-	conn       *nats_client.Conn
+	Log telegraf.Logger `toml:"-"`
+
+	conn       *nats.Conn
 	serializer serializers.Serializer
 }
 
-var sampleConfig = `
-  ## URLs of NATS servers
-  servers = ["nats://localhost:4222"]
-  ## Optional credentials
-  # username = ""
-  # password = ""
-  ## NATS subject for producer messages
-  subject = "telegraf"
-
-  ## Use Transport Layer Security
-  # secure = false
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-  ## Use TLS but skip chain & host verification
-  # insecure_skip_verify = false
-
-  ## Data format to output.
-  ## Each data format has its own unique set of configuration options, read
-  ## more about them here:
-  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
-  data_format = "influx"
-`
+func (*NATS) SampleConfig() string {
+	return sampleConfig
+}
 
 func (n *NATS) SetSerializer(serializer serializers.Serializer) {
 	n.serializer = serializer
@@ -56,19 +46,32 @@ func (n *NATS) SetSerializer(serializer serializers.Serializer) {
 func (n *NATS) Connect() error {
 	var err error
 
-	// set default NATS connection options
-	opts := nats_client.DefaultOptions
-
-	// override max reconnection tries
-	opts.MaxReconnect = -1
-
-	// override servers, if any were specified
-	opts.Servers = n.Servers
+	opts := []nats.Option{
+		nats.MaxReconnects(-1),
+	}
 
 	// override authentication, if any was specified
-	if n.Username != "" {
-		opts.User = n.Username
-		opts.Password = n.Password
+	if !n.Username.Empty() && !n.Password.Empty() {
+		username, err := n.Username.Get()
+		if err != nil {
+			return fmt.Errorf("getting username failed: %w", err)
+		}
+		password, err := n.Password.Get()
+		if err != nil {
+			config.ReleaseSecret(username)
+			return fmt.Errorf("getting password failed: %w", err)
+		}
+		opts = append(opts, nats.UserInfo(string(username), string(password)))
+		config.ReleaseSecret(username)
+		config.ReleaseSecret(password)
+	}
+
+	if n.Credentials != "" {
+		opts = append(opts, nats.UserCredentials(n.Credentials))
+	}
+
+	if n.Name != "" {
+		opts = append(opts, nats.Name(n.Name))
 	}
 
 	if n.Secure {
@@ -77,12 +80,11 @@ func (n *NATS) Connect() error {
 			return err
 		}
 
-		opts.Secure = true
-		opts.TLSConfig = tlsConfig
+		opts = append(opts, nats.Secure(tlsConfig))
 	}
 
 	// try and connect
-	n.conn, err = opts.Connect()
+	n.conn, err = nats.Connect(strings.Join(n.Servers, ","), opts...)
 
 	return err
 }
@@ -90,14 +92,6 @@ func (n *NATS) Connect() error {
 func (n *NATS) Close() error {
 	n.conn.Close()
 	return nil
-}
-
-func (n *NATS) SampleConfig() string {
-	return sampleConfig
-}
-
-func (n *NATS) Description() string {
-	return "Send telegraf measurements to NATS"
 }
 
 func (n *NATS) Write(metrics []telegraf.Metric) error {
@@ -108,7 +102,7 @@ func (n *NATS) Write(metrics []telegraf.Metric) error {
 	for _, metric := range metrics {
 		buf, err := n.serializer.Serialize(metric)
 		if err != nil {
-			log.Printf("D! [outputs.nats] Could not serialize metric: %v", err)
+			n.Log.Debugf("Could not serialize metric: %v", err)
 			continue
 		}
 

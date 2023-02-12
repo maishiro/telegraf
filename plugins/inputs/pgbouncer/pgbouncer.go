@@ -1,14 +1,22 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package pgbouncer
 
 import (
 	"bytes"
+	_ "embed"
+	"strconv"
+
+	// Required for SQL framework driver
+	_ "github.com/jackc/pgx/v4/stdlib"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/plugins/inputs/postgresql"
-	_ "github.com/jackc/pgx/stdlib" // register driver
 )
+
+//go:embed sample.conf
+var sampleConfig string
 
 type PgBouncer struct {
 	postgresql.Service
@@ -18,24 +26,8 @@ var ignoredColumns = map[string]bool{"user": true, "database": true, "pool_mode"
 	"avg_req": true, "avg_recv": true, "avg_sent": true, "avg_query": true,
 }
 
-var sampleConfig = `
-  ## specify address via a url matching:
-  ##   postgres://[pqgotest[:password]]@localhost[/dbname]\
-  ##       ?sslmode=[disable|verify-ca|verify-full]
-  ## or a simple string:
-  ##   host=localhost user=pqotest password=... sslmode=... dbname=app_production
-  ##
-  ## All connection parameters are optional.
-  ##
-  address = "host=localhost user=pgbouncer sslmode=disable"
-`
-
-func (p *PgBouncer) SampleConfig() string {
+func (*PgBouncer) SampleConfig() string {
 	return sampleConfig
-}
-
-func (p *PgBouncer) Description() string {
-	return "Read metrics from one or many pgbouncer servers"
 }
 
 func (p *PgBouncer) Gather(acc telegraf.Accumulator) error {
@@ -60,7 +52,7 @@ func (p *PgBouncer) Gather(acc telegraf.Accumulator) error {
 	}
 
 	for rows.Next() {
-		tags, columnMap, err := p.accRow(rows, acc, columns)
+		tags, columnMap, err := p.accRow(rows, columns)
 
 		if err != nil {
 			return err
@@ -69,11 +61,30 @@ func (p *PgBouncer) Gather(acc telegraf.Accumulator) error {
 		fields := make(map[string]interface{})
 		for col, val := range columnMap {
 			_, ignore := ignoredColumns[col]
-			if !ignore {
-				fields[col] = *val
+			if ignore {
+				continue
+			}
+
+			switch v := (*val).(type) {
+			case int64:
+				// Integer fields are returned in pgbouncer 1.5 through 1.9
+				fields[col] = v
+			case string:
+				// Integer fields are returned in pgbouncer 1.12
+				integer, err := strconv.ParseInt(v, 10, 64)
+				if err != nil {
+					return err
+				}
+
+				fields[col] = integer
 			}
 		}
 		acc.AddFields("pgbouncer", fields, tags)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return err
 	}
 
 	query = `SHOW POOLS`
@@ -91,7 +102,7 @@ func (p *PgBouncer) Gather(acc telegraf.Accumulator) error {
 	}
 
 	for poolRows.Next() {
-		tags, columnMap, err := p.accRow(poolRows, acc, columns)
+		tags, columnMap, err := p.accRow(poolRows, columns)
 		if err != nil {
 			return err
 		}
@@ -125,9 +136,8 @@ type scanner interface {
 	Scan(dest ...interface{}) error
 }
 
-func (p *PgBouncer) accRow(row scanner, acc telegraf.Accumulator, columns []string) (map[string]string,
+func (p *PgBouncer) accRow(row scanner, columns []string) (map[string]string,
 	map[string]*interface{}, error) {
-	var columnVars []interface{}
 	var dbname bytes.Buffer
 
 	// this is where we'll store the column name with its *interface{}
@@ -137,6 +147,7 @@ func (p *PgBouncer) accRow(row scanner, acc telegraf.Accumulator, columns []stri
 		columnMap[column] = new(interface{})
 	}
 
+	columnVars := make([]interface{}, 0, len(columnMap))
 	// populate the array of interface{} with the pointers in the right order
 	for i := 0; i < len(columnMap); i++ {
 		columnVars = append(columnVars, columnMap[columns[i]])
@@ -150,9 +161,13 @@ func (p *PgBouncer) accRow(row scanner, acc telegraf.Accumulator, columns []stri
 	}
 	if columnMap["database"] != nil {
 		// extract the database name from the column map
-		dbname.WriteString((*columnMap["database"]).(string))
+		if _, err := dbname.WriteString((*columnMap["database"]).(string)); err != nil {
+			return nil, nil, err
+		}
 	} else {
-		dbname.WriteString("postgres")
+		if _, err := dbname.WriteString("postgres"); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var tagAddress string
@@ -169,11 +184,9 @@ func init() {
 	inputs.Add("pgbouncer", func() telegraf.Input {
 		return &PgBouncer{
 			Service: postgresql.Service{
-				MaxIdle: 1,
-				MaxOpen: 1,
-				MaxLifetime: internal.Duration{
-					Duration: 0,
-				},
+				MaxIdle:     1,
+				MaxOpen:     1,
+				MaxLifetime: config.Duration(0),
 				IsPgBouncer: true,
 			},
 		}

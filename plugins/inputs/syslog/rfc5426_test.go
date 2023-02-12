@@ -2,26 +2,21 @@ package syslog
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
-	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/require"
 )
 
-func getTestCasesForRFC5426() []testCasePacket {
+func getTestCasesForRFC5426(hasRemoteAddr bool) []testCasePacket {
 	testCases := []testCasePacket{
-		{
-			name: "empty",
-			data: []byte(""),
-			werr: true,
-		},
 		{
 			name: "complete",
 			data: []byte("<1>1 - - - - - - A"),
@@ -88,7 +83,10 @@ func getTestCasesForRFC5426() []testCasePacket {
 		},
 		{
 			name: "average",
-			data: []byte(`<29>1 2016-02-21T04:32:57+00:00 web1 someservice 2341 2 [origin][meta sequence="14125553" service="someservice"] "GET /v1/ok HTTP/1.1" 200 145 "-" "hacheck 0.9.0" 24306 127.0.0.1:40124 575`),
+			data: []byte(
+				`<29>1 2016-02-21T04:32:57+00:00 web1 someservice 2341 2 [origin][meta sequence="14125553" service="someservice"] ` +
+					`"GET /v1/ok HTTP/1.1" 200 145 "-" "hacheck 0.9.0" 24306 127.0.0.1:40124 575`,
+			),
 			wantBestEffort: testutil.MustMetric(
 				"syslog",
 				map[string]string{
@@ -228,26 +226,33 @@ func getTestCasesForRFC5426() []testCasePacket {
 		},
 	}
 
+	if hasRemoteAddr {
+		for _, tc := range testCases {
+			if tc.wantStrict != nil {
+				tc.wantStrict.AddTag("source", "127.0.0.1")
+			}
+			if tc.wantBestEffort != nil {
+				tc.wantBestEffort.AddTag("source", "127.0.0.1")
+			}
+		}
+	}
+
 	return testCases
 }
 
 func testRFC5426(t *testing.T, protocol string, address string, bestEffort bool) {
-	for _, tc := range getTestCasesForRFC5426() {
+	for _, tc := range getTestCasesForRFC5426(protocol != "unixgram") {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create receiver
-			receiver := newUDPSyslogReceiver(protocol+"://"+address, bestEffort)
+			receiver := newUDPSyslogReceiver(protocol+"://"+address, bestEffort, syslogRFC5424)
 			acc := &testutil.Accumulator{}
 			require.NoError(t, receiver.Start(acc))
 			defer receiver.Stop()
 
-			// Clear
-			acc.ClearMetrics()
-			acc.Errors = make([]error, 0)
-
 			// Connect
 			conn, err := net.Dial(protocol, address)
 			require.NotNil(t, conn)
-			require.Nil(t, err)
+			require.NoError(t, err)
 
 			// Write
 			_, err = conn.Write(tc.data)
@@ -293,20 +298,28 @@ func TestStrict_udp(t *testing.T) {
 }
 
 func TestBestEffort_unixgram(t *testing.T) {
-	tmpdir, err := ioutil.TempDir("", "telegraf")
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping on Windows, as unixgram sockets are not supported")
+	}
+
+	sock := testutil.TempSocket(t)
+	f, err := os.Create(sock)
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpdir)
-	sock := filepath.Join(tmpdir, "syslog.TestBestEffort_unixgram.sock")
-	os.Create(sock)
+	t.Cleanup(func() { require.NoError(t, f.Close()) })
+
 	testRFC5426(t, "unixgram", sock, true)
 }
 
 func TestStrict_unixgram(t *testing.T) {
-	tmpdir, err := ioutil.TempDir("", "telegraf")
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping on Windows, as unixgram sockets are not supported")
+	}
+
+	sock := testutil.TempSocket(t)
+	f, err := os.Create(sock)
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpdir)
-	sock := filepath.Join(tmpdir, "syslog.TestStrict_unixgram.sock")
-	os.Create(sock)
+	t.Cleanup(func() { require.NoError(t, f.Close()) })
+
 	testRFC5426(t, "unixgram", sock, false)
 }
 
@@ -322,10 +335,11 @@ func TestTimeIncrement_udp(t *testing.T) {
 
 	// Create receiver
 	receiver := &Syslog{
-		Address:    "udp://" + address,
-		now:        getNow,
-		BestEffort: false,
-		Separator:  "_",
+		Address:        "udp://" + address,
+		now:            getNow,
+		BestEffort:     false,
+		SyslogStandard: syslogRFC5424,
+		Separator:      "_",
 	}
 	acc := &testutil.Accumulator{}
 	require.NoError(t, receiver.Start(acc))
@@ -335,7 +349,7 @@ func TestTimeIncrement_udp(t *testing.T) {
 	conn, err := net.Dial("udp", address)
 	require.NotNil(t, conn)
 	defer conn.Close()
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	// Write
 	_, e := conn.Write([]byte("<1>1 - - - - - -"))
@@ -350,6 +364,7 @@ func TestTimeIncrement_udp(t *testing.T) {
 			map[string]string{
 				"severity": "alert",
 				"facility": "kern",
+				"source":   "127.0.0.1",
 			},
 			map[string]interface{}{
 				"version":       uint16(1),
@@ -380,6 +395,7 @@ func TestTimeIncrement_udp(t *testing.T) {
 			map[string]string{
 				"severity": "alert",
 				"facility": "kern",
+				"source":   "127.0.0.1",
 			},
 			map[string]interface{}{
 				"version":       uint16(1),
@@ -409,6 +425,7 @@ func TestTimeIncrement_udp(t *testing.T) {
 			map[string]string{
 				"severity": "alert",
 				"facility": "kern",
+				"source":   "127.0.0.1",
 			},
 			map[string]interface{}{
 				"version":       uint16(1),

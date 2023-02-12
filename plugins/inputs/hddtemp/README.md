@@ -4,9 +4,19 @@ This plugin reads data from hddtemp daemon.
 
 Hddtemp should be installed and its daemon running.
 
-### Configuration
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Monitor disks' temperatures using hddtemp
 [[inputs.hddtemp]]
   ## By default, telegraf gathers temps data from all disks detected by the
   ## hddtemp.
@@ -19,7 +29,7 @@ Hddtemp should be installed and its daemon running.
   # devices = ["sda", "*"]
 ```
 
-### Metrics
+## Metrics
 
 - hddtemp
   - tags:
@@ -31,10 +41,9 @@ Hddtemp should be installed and its daemon running.
   - fields:
     - temperature
 
+## Example Output
 
-### Example output
-
-```
+```shell
 hddtemp,source=server1,unit=C,status=,device=sdb,model=WDC\ WD740GD-00FLA1 temperature=43i 1481655647000000000
 hddtemp,device=sdc,model=SAMSUNG\ HD103UI,unit=C,source=server1,status= temperature=38i 148165564700000000
 hddtemp,device=sdd,model=SAMSUNG\ HD103UI,unit=C,source=server1,status= temperature=36i 1481655647000000000

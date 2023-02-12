@@ -1,15 +1,15 @@
 package syslog
 
 import (
-	"io/ioutil"
-	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/influxdata/telegraf/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/influxdata/telegraf/testutil"
 )
 
 const (
@@ -20,7 +20,8 @@ var defaultTime = time.Unix(0, 0)
 var maxP = uint8(191)
 var maxV = uint16(999)
 var maxTS = "2017-12-31T23:59:59.999999+00:00"
-var maxH = "abcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabc"
+var maxH = "abcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqr" +
+	"stuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabc"
 var maxA = "abcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdef"
 var maxPID = "abcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzabcdefghilmnopqrstuvzab"
 var maxMID = "abcdefghilmnopqrstuvzabcdefghilm"
@@ -44,18 +45,19 @@ func TestAddress(t *testing.T) {
 	require.EqualError(t, err, "unknown protocol 'unsupported' in 'example.com:6514'")
 	require.Error(t, err)
 
-	tmpdir, err := ioutil.TempDir("", "telegraf")
-	defer os.RemoveAll(tmpdir)
-	require.NoError(t, err)
+	tmpdir := t.TempDir()
 	sock := filepath.Join(tmpdir, "syslog.TestAddress.sock")
 
-	rec = &Syslog{
-		Address: "unixgram://" + sock,
+	if runtime.GOOS != "windows" {
+		// Skipping on Windows, as unixgram sockets are not supported
+		rec = &Syslog{
+			Address: "unixgram://" + sock,
+		}
+		err = rec.Start(&testutil.Accumulator{})
+		require.NoError(t, err)
+		require.Equal(t, sock, rec.Address)
+		rec.Stop()
 	}
-	err = rec.Start(&testutil.Accumulator{})
-	require.NoError(t, err)
-	require.Equal(t, sock, rec.Address)
-	rec.Stop()
 
 	// Default port is 6514
 	rec = &Syslog{

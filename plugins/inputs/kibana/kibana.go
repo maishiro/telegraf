@@ -1,18 +1,25 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package kibana
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
+
+//go:embed sample.conf
+var sampleConfig string
 
 const statusPath = "/api/status"
 
@@ -40,7 +47,7 @@ type overallStatus struct {
 }
 
 type metrics struct {
-	UptimeInMillis             int64         `json:"uptime_in_millis"`
+	UptimeInMillis             float64       `json:"uptime_in_millis"`
 	ConcurrentConnections      int64         `json:"concurrent_connections"`
 	CollectionIntervalInMilles int64         `json:"collection_interval_in_millis"`
 	ResponseTimes              responseTimes `json:"response_times"`
@@ -54,7 +61,9 @@ type responseTimes struct {
 }
 
 type process struct {
-	Mem mem `json:"mem"`
+	Mem            mem     `json:"mem"`
+	Memory         memory  `json:"memory"`
+	UptimeInMillis float64 `json:"uptime_in_millis"`
 }
 
 type requests struct {
@@ -66,31 +75,22 @@ type mem struct {
 	HeapUsedInBytes int64 `json:"heap_used_in_bytes"`
 }
 
-const sampleConfig = `
-  ## specify a list of one or more Kibana servers
-  servers = ["http://localhost:5601"]
+type memory struct {
+	Heap heap `json:"heap"`
+}
 
-  ## Timeout for HTTP requests
-  timeout = "5s"
-
-  ## HTTP Basic Auth credentials
-  # username = "username"
-  # password = "pa$$word"
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-  ## Use TLS but skip chain & host verification
-  # insecure_skip_verify = false
-`
+type heap struct {
+	TotalInBytes int64 `json:"total_in_bytes"`
+	UsedInBytes  int64 `json:"used_in_bytes"`
+	SizeLimit    int64 `json:"size_limit"`
+}
 
 type Kibana struct {
 	Local    bool
 	Servers  []string
 	Username string
 	Password string
-	Timeout  internal.Duration
+	Timeout  config.Duration
 	tls.ClientConfig
 
 	client *http.Client
@@ -98,7 +98,7 @@ type Kibana struct {
 
 func NewKibana() *Kibana {
 	return &Kibana{
-		Timeout: internal.Duration{Duration: time.Second * 5},
+		Timeout: config.Duration(time.Second * 5),
 	}
 }
 
@@ -115,19 +115,13 @@ func mapHealthStatusToCode(s string) int {
 	return 0
 }
 
-// SampleConfig returns sample configuration for this plugin.
-func (k *Kibana) SampleConfig() string {
+func (*Kibana) SampleConfig() string {
 	return sampleConfig
-}
-
-// Description returns the plugin description.
-func (k *Kibana) Description() string {
-	return "Read status information from one or more Kibana servers"
 }
 
 func (k *Kibana) Gather(acc telegraf.Accumulator) error {
 	if k.client == nil {
-		client, err := k.createHttpClient()
+		client, err := k.createHTTPClient()
 
 		if err != nil {
 			return err
@@ -152,7 +146,7 @@ func (k *Kibana) Gather(acc telegraf.Accumulator) error {
 	return nil
 }
 
-func (k *Kibana) createHttpClient() (*http.Client, error) {
+func (k *Kibana) createHTTPClient() (*http.Client, error) {
 	tlsCfg, err := k.ClientConfig.TLSConfig()
 	if err != nil {
 		return nil, err
@@ -162,18 +156,17 @@ func (k *Kibana) createHttpClient() (*http.Client, error) {
 		Transport: &http.Transport{
 			TLSClientConfig: tlsCfg,
 		},
-		Timeout: k.Timeout.Duration,
+		Timeout: time.Duration(k.Timeout),
 	}
 
 	return client, nil
 }
 
-func (k *Kibana) gatherKibanaStatus(baseUrl string, acc telegraf.Accumulator) error {
-
+func (k *Kibana) gatherKibanaStatus(baseURL string, acc telegraf.Accumulator) error {
 	kibanaStatus := &kibanaStatus{}
-	url := baseUrl + statusPath
+	url := baseURL + statusPath
 
-	host, err := k.gatherJsonData(url, kibanaStatus)
+	host, err := k.gatherJSONData(url, kibanaStatus)
 	if err != nil {
 		return err
 	}
@@ -187,23 +180,46 @@ func (k *Kibana) gatherKibanaStatus(baseUrl string, acc telegraf.Accumulator) er
 	tags["status"] = kibanaStatus.Status.Overall.State
 
 	fields["status_code"] = mapHealthStatusToCode(kibanaStatus.Status.Overall.State)
-
-	fields["uptime_ms"] = kibanaStatus.Metrics.UptimeInMillis
 	fields["concurrent_connections"] = kibanaStatus.Metrics.ConcurrentConnections
-	fields["heap_max_bytes"] = kibanaStatus.Metrics.Process.Mem.HeapMaxInBytes
-	fields["heap_used_bytes"] = kibanaStatus.Metrics.Process.Mem.HeapUsedInBytes
 	fields["response_time_avg_ms"] = kibanaStatus.Metrics.ResponseTimes.AvgInMillis
 	fields["response_time_max_ms"] = kibanaStatus.Metrics.ResponseTimes.MaxInMillis
 	fields["requests_per_sec"] = float64(kibanaStatus.Metrics.Requests.Total) / float64(kibanaStatus.Metrics.CollectionIntervalInMilles) * 1000
 
+	versionArray := strings.Split(kibanaStatus.Version.Number, ".")
+	arrayElement := 1
+
+	if len(versionArray) > 1 {
+		arrayElement = 2
+	}
+	versionNumber, err := strconv.ParseFloat(strings.Join(versionArray[:arrayElement], "."), 64)
+	if err != nil {
+		return err
+	}
+
+	// Same value will be assigned to both the metrics [heap_max_bytes and heap_total_bytes ]
+	// Which keeps the code backward compatible
+	if versionNumber >= 6.4 {
+		fields["uptime_ms"] = int64(kibanaStatus.Metrics.Process.UptimeInMillis)
+		fields["heap_max_bytes"] = kibanaStatus.Metrics.Process.Memory.Heap.TotalInBytes
+		fields["heap_total_bytes"] = kibanaStatus.Metrics.Process.Memory.Heap.TotalInBytes
+		fields["heap_used_bytes"] = kibanaStatus.Metrics.Process.Memory.Heap.UsedInBytes
+		fields["heap_size_limit"] = kibanaStatus.Metrics.Process.Memory.Heap.SizeLimit
+	} else {
+		fields["uptime_ms"] = int64(kibanaStatus.Metrics.UptimeInMillis)
+		fields["heap_max_bytes"] = kibanaStatus.Metrics.Process.Mem.HeapMaxInBytes
+		fields["heap_total_bytes"] = kibanaStatus.Metrics.Process.Mem.HeapMaxInBytes
+		fields["heap_used_bytes"] = kibanaStatus.Metrics.Process.Mem.HeapUsedInBytes
+	}
 	acc.AddFields("kibana", fields, tags)
 
 	return nil
 }
 
-func (k *Kibana) gatherJsonData(url string, v interface{}) (host string, err error) {
-
+func (k *Kibana) gatherJSONData(url string, v interface{}) (host string, err error) {
 	request, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("unable to create new request '%s': %v", url, err)
+	}
 
 	if (k.Username != "") || (k.Password != "") {
 		request.SetBasicAuth(k.Username, k.Password)
@@ -215,6 +231,12 @@ func (k *Kibana) gatherJsonData(url string, v interface{}) (host string, err err
 	}
 
 	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		// ignore the err here; LimitReader returns io.EOF and we're not interested in read errors.
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 200))
+		return request.Host, fmt.Errorf("%s returned HTTP status %s: %q", url, response.Status, body)
+	}
 
 	if err = json.NewDecoder(response.Body).Decode(v); err != nil {
 		return request.Host, err

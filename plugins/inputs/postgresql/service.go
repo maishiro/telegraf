@@ -1,19 +1,21 @@
 package postgresql
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
-	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
-	"github.com/jackc/pgx/stdlib"
 	"net"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/stdlib"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/config"
 )
 
 // pulled from lib/pq
@@ -87,87 +89,85 @@ func parseURL(uri string) (string, error) {
 // Service common functionality shared between the postgresql and postgresql_extensible
 // packages.
 type Service struct {
-	Address       string
-	Outputaddress string
-	MaxIdle       int
-	MaxOpen       int
-	MaxLifetime   internal.Duration
+	Address       config.Secret   `toml:"address"`
+	OutputAddress string          `toml:"outputaddress"`
+	MaxIdle       int             `toml:"max_idle"`
+	MaxOpen       int             `toml:"max_open"`
+	MaxLifetime   config.Duration `toml:"max_lifetime"`
+	IsPgBouncer   bool            `toml:"-"`
 	DB            *sql.DB
-	IsPgBouncer   bool
 }
+
+var socketRegexp = regexp.MustCompile(`/\.s\.PGSQL\.\d+$`)
 
 // Start starts the ServiceInput's service, whatever that may be
 func (p *Service) Start(telegraf.Accumulator) (err error) {
-	const localhost = "host=localhost sslmode=disable"
+	addr, err := p.Address.Get()
+	if err != nil {
+		return fmt.Errorf("getting address failed: %v", err)
+	}
+	defer config.ReleaseSecret(addr)
 
-	if p.Address == "" || p.Address == "localhost" {
-		p.Address = localhost
+	if p.Address.Empty() || string(addr) == "localhost" {
+		addr = []byte("host=localhost sslmode=disable")
+		p.Address = config.NewSecret(addr)
 	}
 
-	connectionString := p.Address
+	connConfig, err := pgx.ParseConfig(string(addr))
+	if err != nil {
+		return err
+	}
+
+	// Remove the socket name from the path
+	connConfig.Host = socketRegexp.ReplaceAllLiteralString(connConfig.Host, "")
 
 	// Specific support to make it work with PgBouncer too
 	// See https://github.com/influxdata/telegraf/issues/3253#issuecomment-357505343
 	if p.IsPgBouncer {
-		d := &stdlib.DriverConfig{
-			ConnConfig: pgx.ConnConfig{
-				PreferSimpleProtocol: true,
-				RuntimeParams: map[string]string{
-					"client_encoding": "UTF8",
-				},
-				CustomConnInfo: func(c *pgx.Conn) (*pgtype.ConnInfo, error) {
-					info := c.ConnInfo.DeepCopy()
-					info.RegisterDataType(pgtype.DataType{
-						Value: &pgtype.OIDValue{},
-						Name:  "int8OID",
-						OID:   pgtype.Int8OID,
-					})
-
-					return info, nil
-				},
-			},
-		}
-		stdlib.RegisterDriverConfig(d)
-		connectionString = d.ConnectionString(p.Address)
+		// Remove DriveConfig and revert it by the ParseConfig method
+		// See https://github.com/influxdata/telegraf/issues/9134
+		connConfig.PreferSimpleProtocol = true
 	}
 
+	connectionString := stdlib.RegisterConnConfig(connConfig)
 	if p.DB, err = sql.Open("pgx", connectionString); err != nil {
 		return err
 	}
 
 	p.DB.SetMaxOpenConns(p.MaxOpen)
 	p.DB.SetMaxIdleConns(p.MaxIdle)
-	p.DB.SetConnMaxLifetime(p.MaxLifetime.Duration)
+	p.DB.SetConnMaxLifetime(time.Duration(p.MaxLifetime))
 
 	return nil
 }
 
 // Stop stops the services and closes any necessary channels and connections
 func (p *Service) Stop() {
-	p.DB.Close()
+	p.DB.Close() //nolint:revive // ignore the returned error as we cannot do anything about it anyway
 }
 
-var kvMatcher, _ = regexp.Compile("(password|sslcert|sslkey|sslmode|sslrootcert)=\\S+ ?")
+var kvMatcher, _ = regexp.Compile(`(password|sslcert|sslkey|sslmode|sslrootcert)=\S+ ?`)
 
 // SanitizedAddress utility function to strip sensitive information from the connection string.
 func (p *Service) SanitizedAddress() (sanitizedAddress string, err error) {
-	var (
-		canonicalizedAddress string
-	)
-
-	if p.Outputaddress != "" {
-		return p.Outputaddress, nil
+	if p.OutputAddress != "" {
+		return p.OutputAddress, nil
 	}
 
-	if strings.HasPrefix(p.Address, "postgres://") || strings.HasPrefix(p.Address, "postgresql://") {
-		if canonicalizedAddress, err = parseURL(p.Address); err != nil {
+	addr, err := p.Address.Get()
+	if err != nil {
+		return sanitizedAddress, fmt.Errorf("getting address for sanitization failed: %v", err)
+	}
+	defer config.ReleaseSecret(addr)
+
+	var canonicalizedAddress string
+	if bytes.HasPrefix(addr, []byte("postgres://")) || bytes.HasPrefix(addr, []byte("postgresql://")) {
+		if canonicalizedAddress, err = parseURL(string(addr)); err != nil {
 			return sanitizedAddress, err
 		}
 	} else {
-		canonicalizedAddress = p.Address
+		canonicalizedAddress = string(addr)
 	}
 
-	sanitizedAddress = kvMatcher.ReplaceAllString(canonicalizedAddress, "")
-
-	return sanitizedAddress, err
+	return kvMatcher.ReplaceAllString(canonicalizedAddress, ""), nil
 }

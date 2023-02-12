@@ -1,9 +1,12 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package graylog
 
 import (
 	"bytes"
 	"compress/zlib"
 	"crypto/rand"
+	"crypto/tls"
+	_ "embed"
 	"encoding/binary"
 	ejson "encoding/json"
 	"fmt"
@@ -11,73 +14,128 @@ import (
 	"math"
 	"net"
 	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
+	tlsint "github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/outputs"
 )
 
+//go:embed sample.conf
+var sampleConfig string
+
 const (
-	defaultGraylogEndpoint = "127.0.0.1:12201"
-	defaultConnection      = "wan"
-	defaultMaxChunkSizeWan = 1420
-	defaultMaxChunkSizeLan = 8154
+	defaultEndpoint         = "127.0.0.1:12201"
+	defaultConnection       = "wan"
+	defaultMaxChunkSizeWan  = 1420
+	defaultMaxChunkSizeLan  = 8154
+	defaultScheme           = "udp"
+	defaultTimeout          = 5 * time.Second
+	defaultReconnectionTime = 15 * time.Second
 )
 
-type GelfConfig struct {
-	GraylogEndpoint string
+var defaultSpecFields = []string{"version", "host", "short_message", "full_message", "timestamp", "level", "facility", "line", "file"}
+
+type gelfConfig struct {
+	Endpoint        string
 	Connection      string
 	MaxChunkSizeWan int
 	MaxChunkSizeLan int
 }
 
-type Gelf struct {
-	GelfConfig
+type gelf interface {
+	io.WriteCloser
+	Connect() error
 }
 
-func NewGelfWriter(config GelfConfig) *Gelf {
-	if config.GraylogEndpoint == "" {
-		config.GraylogEndpoint = defaultGraylogEndpoint
+type gelfCommon struct {
+	gelfConfig
+	dialer *net.Dialer
+	conn   net.Conn
+}
+
+type gelfUDP struct {
+	gelfCommon
+}
+
+type gelfTCP struct {
+	gelfCommon
+	tlsConfig *tls.Config
+}
+
+func newGelfWriter(cfg gelfConfig, dialer *net.Dialer, tlsConfig *tls.Config) gelf {
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = defaultEndpoint
 	}
 
-	if config.Connection == "" {
-		config.Connection = defaultConnection
+	if cfg.Connection == "" {
+		cfg.Connection = defaultConnection
 	}
 
-	if config.MaxChunkSizeWan == 0 {
-		config.MaxChunkSizeWan = defaultMaxChunkSizeWan
+	if cfg.MaxChunkSizeWan == 0 {
+		cfg.MaxChunkSizeWan = defaultMaxChunkSizeWan
 	}
 
-	if config.MaxChunkSizeLan == 0 {
-		config.MaxChunkSizeLan = defaultMaxChunkSizeLan
+	if cfg.MaxChunkSizeLan == 0 {
+		cfg.MaxChunkSizeLan = defaultMaxChunkSizeLan
 	}
 
-	g := &Gelf{GelfConfig: config}
+	scheme := defaultScheme
+	parts := strings.SplitN(cfg.Endpoint, "://", 2)
+	if len(parts) == 2 {
+		scheme = strings.ToLower(parts[0])
+		cfg.Endpoint = parts[1]
+	}
+	common := gelfCommon{
+		gelfConfig: cfg,
+		dialer:     dialer,
+	}
+
+	var g gelf
+	switch scheme {
+	case "tcp":
+		g = &gelfTCP{gelfCommon: common, tlsConfig: tlsConfig}
+	default:
+		g = &gelfUDP{gelfCommon: common}
+	}
 
 	return g
 }
 
-func (g *Gelf) Write(message []byte) (n int, err error) {
-	compressed := g.compress(message)
+func (g *gelfUDP) Write(message []byte) (n int, err error) {
+	compressed, err := g.compress(message)
+	if err != nil {
+		return 0, err
+	}
 
-	chunksize := g.GelfConfig.MaxChunkSizeWan
+	chunksize := g.gelfConfig.MaxChunkSizeWan
 	length := compressed.Len()
 
 	if length > chunksize {
-
 		chunkCountInt := int(math.Ceil(float64(length) / float64(chunksize)))
 
 		id := make([]byte, 8)
-		rand.Read(id)
+		_, err = rand.Read(id)
+		if err != nil {
+			return 0, err
+		}
 
 		for i, index := 0, 0; i < length; i, index = i+chunksize, index+1 {
-			packet := g.createChunkedMessage(index, chunkCountInt, id, &compressed)
-			_, err = g.send(packet.Bytes())
+			packet, err := g.createChunkedMessage(index, chunkCountInt, id, &compressed)
+			if err != nil {
+				return 0, err
+			}
+
+			err = g.send(packet.Bytes())
 			if err != nil {
 				return 0, err
 			}
 		}
 	} else {
-		_, err = g.send(compressed.Bytes())
+		err = g.send(compressed.Bytes())
 		if err != nil {
 			return 0, err
 		}
@@ -85,139 +143,343 @@ func (g *Gelf) Write(message []byte) (n int, err error) {
 
 	n = len(message)
 
-	return
+	return n, nil
 }
 
-func (g *Gelf) createChunkedMessage(index int, chunkCountInt int, id []byte, compressed *bytes.Buffer) bytes.Buffer {
+func (g *gelfUDP) Close() (err error) {
+	if g.conn != nil {
+		err = g.conn.Close()
+		g.conn = nil
+	}
+
+	return err
+}
+
+func (g *gelfUDP) createChunkedMessage(index int, chunkCountInt int, id []byte, compressed *bytes.Buffer) (bytes.Buffer, error) {
 	var packet bytes.Buffer
 
 	chunksize := g.getChunksize()
 
-	packet.Write(g.intToBytes(30))
-	packet.Write(g.intToBytes(15))
-	packet.Write(id)
+	b, err := g.intToBytes(30)
+	if err != nil {
+		return packet, err
+	}
+	packet.Write(b) //nolint:revive // from buffer.go: "err is always nil"
 
-	packet.Write(g.intToBytes(index))
-	packet.Write(g.intToBytes(chunkCountInt))
+	b, err = g.intToBytes(15)
+	if err != nil {
+		return packet, err
+	}
+	packet.Write(b) //nolint:revive // from buffer.go: "err is always nil"
 
-	packet.Write(compressed.Next(chunksize))
+	packet.Write(id) //nolint:revive // from buffer.go: "err is always nil"
 
-	return packet
+	b, err = g.intToBytes(index)
+	if err != nil {
+		return packet, err
+	}
+	packet.Write(b) //nolint:revive // from buffer.go: "err is always nil"
+
+	b, err = g.intToBytes(chunkCountInt)
+	if err != nil {
+		return packet, err
+	}
+	packet.Write(b) //nolint:revive // from buffer.go: "err is always nil"
+
+	packet.Write(compressed.Next(chunksize)) //nolint:revive // from buffer.go: "err is always nil"
+
+	return packet, nil
 }
 
-func (g *Gelf) getChunksize() int {
-	if g.GelfConfig.Connection == "wan" {
-		return g.GelfConfig.MaxChunkSizeWan
+func (g *gelfUDP) getChunksize() int {
+	if g.gelfConfig.Connection == "wan" {
+		return g.gelfConfig.MaxChunkSizeWan
 	}
 
-	if g.GelfConfig.Connection == "lan" {
-		return g.GelfConfig.MaxChunkSizeLan
+	if g.gelfConfig.Connection == "lan" {
+		return g.gelfConfig.MaxChunkSizeLan
 	}
 
-	return g.GelfConfig.MaxChunkSizeWan
+	return g.gelfConfig.MaxChunkSizeWan
 }
 
-func (g *Gelf) intToBytes(i int) []byte {
+func (g *gelfUDP) intToBytes(i int) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
-	binary.Write(buf, binary.LittleEndian, int8(i))
-	return buf.Bytes()
+	err := binary.Write(buf, binary.LittleEndian, int8(i))
+	if err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), err
 }
 
-func (g *Gelf) compress(b []byte) bytes.Buffer {
+func (g *gelfUDP) compress(b []byte) (bytes.Buffer, error) {
 	var buf bytes.Buffer
 	comp := zlib.NewWriter(&buf)
 
-	comp.Write(b)
-	comp.Close()
+	if _, err := comp.Write(b); err != nil {
+		return bytes.Buffer{}, err
+	}
 
-	return buf
+	if err := comp.Close(); err != nil {
+		return bytes.Buffer{}, err
+	}
+
+	return buf, nil
 }
 
-func (g *Gelf) send(b []byte) (n int, err error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", g.GelfConfig.GraylogEndpoint)
+func (g *gelfUDP) Connect() error {
+	conn, err := g.dialer.Dial("udp", g.gelfConfig.Endpoint)
 	if err != nil {
-		return
+		return err
+	}
+	g.conn = conn
+	return nil
+}
+
+func (g *gelfUDP) send(b []byte) error {
+	if g.conn == nil {
+		err := g.Connect()
+		if err != nil {
+			return err
+		}
 	}
 
-	conn, err := net.DialUDP("udp", nil, udpAddr)
+	_, err := g.conn.Write(b)
 	if err != nil {
-		return
+		_ = g.conn.Close()
+		g.conn = nil
 	}
 
-	n, err = conn.Write(b)
-	return
+	return err
+}
+
+func (g *gelfTCP) Write(message []byte) (n int, err error) {
+	err = g.send(message)
+	if err != nil {
+		return 0, err
+	}
+
+	n = len(message)
+
+	return n, nil
+}
+
+func (g *gelfTCP) Close() (err error) {
+	if g.conn != nil {
+		err = g.conn.Close()
+		g.conn = nil
+	}
+
+	return err
+}
+
+func (g *gelfTCP) Connect() error {
+	var err error
+	var conn net.Conn
+	if g.tlsConfig == nil {
+		conn, err = g.dialer.Dial("tcp", g.gelfConfig.Endpoint)
+	} else {
+		conn, err = tls.DialWithDialer(g.dialer, "tcp", g.gelfConfig.Endpoint, g.tlsConfig)
+	}
+	if err != nil {
+		return err
+	}
+	g.conn = conn
+	return nil
+}
+
+func (g *gelfTCP) send(b []byte) error {
+	if g.conn == nil {
+		err := g.Connect()
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err := g.conn.Write(b)
+	if err != nil {
+		_ = g.conn.Close()
+		g.conn = nil
+	} else {
+		_, err = g.conn.Write([]byte{0}) // message delimiter
+		if err != nil {
+			_ = g.conn.Close()
+			g.conn = nil
+		}
+	}
+
+	return err
 }
 
 type Graylog struct {
-	Servers []string
-	writer  io.Writer
+	Servers           []string        `toml:"servers"`
+	ShortMessageField string          `toml:"short_message_field"`
+	NameFieldNoPrefix bool            `toml:"name_field_noprefix"`
+	Timeout           config.Duration `toml:"timeout"`
+	Reconnection      bool            `toml:"connection_retry"`
+	ReconnectionTime  config.Duration `toml:"connection_retry_wait_time"`
+	Log               telegraf.Logger `toml:"-"`
+	tlsint.ClientConfig
+
+	writer      io.Writer
+	closers     []io.WriteCloser
+	unconnected []string
+	stopRetry   bool
+	wg          sync.WaitGroup
+
+	sync.Mutex
 }
 
-var sampleConfig = `
-  ## UDP endpoint for your graylog instance.
-  servers = ["127.0.0.1:12201", "192.168.1.1:12201"]
-`
+func (*Graylog) SampleConfig() string {
+	return sampleConfig
+}
 
 func (g *Graylog) Connect() error {
-	writers := []io.Writer{}
-
 	if len(g.Servers) == 0 {
 		g.Servers = append(g.Servers, "localhost:12201")
 	}
 
-	for _, server := range g.Servers {
-		w := NewGelfWriter(GelfConfig{GraylogEndpoint: server})
-		writers = append(writers, w)
+	tlsCfg, err := g.ClientConfig.TLSConfig()
+	if err != nil {
+		return err
 	}
 
-	g.writer = io.MultiWriter(writers...)
-	return nil
-}
-
-func (g *Graylog) Close() error {
-	return nil
-}
-
-func (g *Graylog) SampleConfig() string {
-	return sampleConfig
-}
-
-func (g *Graylog) Description() string {
-	return "Send telegraf metrics to graylog(s)"
-}
-
-func (g *Graylog) Write(metrics []telegraf.Metric) error {
-	if len(metrics) == 0 {
+	if g.Reconnection {
+		go g.connectRetry(tlsCfg)
 		return nil
 	}
 
+	unconnected, gelfs := g.connectEndpoints(g.Servers, tlsCfg)
+	if len(unconnected) > 0 {
+		servers := strings.Join(unconnected, ",")
+		return fmt.Errorf("connect: connection failed for %s", servers)
+	}
+	writers := make([]io.Writer, 0, len(gelfs))
+	closers := make([]io.WriteCloser, 0, len(gelfs))
+	for _, w := range gelfs {
+		writers = append(writers, w)
+		closers = append(closers, w)
+	}
+	g.Lock()
+	defer g.Unlock()
+	g.writer = io.MultiWriter(writers...)
+	g.closers = closers
+
+	return nil
+}
+
+func (g *Graylog) connectRetry(tlsCfg *tls.Config) {
+	var writers []io.Writer
+	var closers []io.WriteCloser
+	var attempt int64
+
+	g.wg.Add(1)
+
+	unconnected := append([]string{}, g.Servers...)
+	for {
+		unconnected, gelfs := g.connectEndpoints(unconnected, tlsCfg)
+		for _, w := range gelfs {
+			writers = append(writers, w)
+			closers = append(closers, w)
+		}
+		g.Lock()
+		g.unconnected = unconnected
+		stopRetry := g.stopRetry
+		g.Unlock()
+		if stopRetry {
+			g.Log.Info("Stopping connection retries...")
+			break
+		}
+		if len(unconnected) == 0 {
+			break
+		}
+		attempt++
+		servers := strings.Join(unconnected, ",")
+		g.Log.Infof("Not connected to endpoints %s after attempt #%d...", servers, attempt)
+		time.Sleep(time.Duration(g.ReconnectionTime))
+	}
+	g.Log.Info("Connected!")
+
+	g.Lock()
+	g.writer = io.MultiWriter(writers...)
+	g.closers = closers
+	g.Unlock()
+
+	g.wg.Done()
+}
+
+func (g *Graylog) connectEndpoints(servers []string, tlsCfg *tls.Config) ([]string, []gelf) {
+	writers := make([]gelf, 0, len(servers))
+	unconnected := make([]string, 0, len(servers))
+	dialer := &net.Dialer{Timeout: time.Duration(g.Timeout)}
+	for _, server := range servers {
+		w := newGelfWriter(gelfConfig{Endpoint: server}, dialer, tlsCfg)
+		if err := w.Connect(); err != nil {
+			g.Log.Warnf("failed to connect to server [%s]: %v", server, err)
+			unconnected = append(unconnected, server)
+			continue
+		}
+		writers = append(writers, w)
+	}
+	return unconnected, writers
+}
+
+func (g *Graylog) Close() error {
+	g.Lock()
+	g.stopRetry = true
+	g.Unlock()
+	g.wg.Wait()
+
+	for _, closer := range g.closers {
+		_ = closer.Close()
+	}
+	return nil
+}
+
+func (g *Graylog) Write(metrics []telegraf.Metric) error {
+	g.Lock()
+	writer := g.writer
+	g.Unlock()
+
+	if writer == nil {
+		g.Lock()
+		unconnected := strings.Join(g.unconnected, ",")
+		g.Unlock()
+
+		return fmt.Errorf("not connected to %s", unconnected)
+	}
 	for _, metric := range metrics {
-		values, err := serialize(metric)
+		values, err := g.serialize(metric)
 		if err != nil {
 			return err
 		}
 
 		for _, value := range values {
-			_, err := g.writer.Write([]byte(value))
+			_, err := writer.Write([]byte(value))
 			if err != nil {
-				return fmt.Errorf("FAILED to write message: %s, %s", value, err)
+				return fmt.Errorf("error writing message: %q, %v", value, err)
 			}
 		}
 	}
 	return nil
 }
 
-func serialize(metric telegraf.Metric) ([]string, error) {
+func (g *Graylog) serialize(metric telegraf.Metric) ([]string, error) {
 	out := []string{}
 
 	m := make(map[string]interface{})
 	m["version"] = "1.1"
-	m["timestamp"] = metric.Time().UnixNano() / 1000000000
+	m["timestamp"] = float64(metric.Time().UnixNano()) / 1_000_000_000
 	m["short_message"] = "telegraf"
-	m["name"] = metric.Name()
+	if g.NameFieldNoPrefix {
+		m["name"] = metric.Name()
+	} else {
+		m["_name"] = metric.Name()
+	}
 
-	if host, ok := metric.Tags()["host"]; ok {
+	if host, ok := metric.GetTag("host"); ok {
 		m["host"] = host
 	} else {
 		host, err := os.Hostname()
@@ -227,14 +489,26 @@ func serialize(metric telegraf.Metric) ([]string, error) {
 		m["host"] = host
 	}
 
-	for key, value := range metric.Tags() {
-		if key != "host" {
-			m["_"+key] = value
+	for _, tag := range metric.TagList() {
+		if tag.Key == "host" {
+			continue
+		}
+
+		if fieldInSpec(tag.Key) {
+			m[tag.Key] = tag.Value
+		} else {
+			m["_"+tag.Key] = tag.Value
 		}
 	}
 
-	for key, value := range metric.Fields() {
-		m["_"+key] = value
+	for _, field := range metric.FieldList() {
+		if field.Key == g.ShortMessageField {
+			m["short_message"] = field.Value
+		} else if fieldInSpec(field.Key) {
+			m[field.Key] = field.Value
+		} else {
+			m["_"+field.Key] = field.Value
+		}
 	}
 
 	serialized, err := ejson.Marshal(m)
@@ -246,8 +520,21 @@ func serialize(metric telegraf.Metric) ([]string, error) {
 	return out, nil
 }
 
+func fieldInSpec(field string) bool {
+	for _, specField := range defaultSpecFields {
+		if specField == field {
+			return true
+		}
+	}
+
+	return false
+}
+
 func init() {
 	outputs.Add("graylog", func() telegraf.Output {
-		return &Graylog{}
+		return &Graylog{
+			Timeout:          config.Duration(defaultTimeout),
+			ReconnectionTime: config.Duration(defaultReconnectionTime),
+		}
 	})
 }

@@ -11,13 +11,44 @@ type Connections struct {
 	Idle     int64 `json:"idle"`
 }
 
+type Slabs map[string]struct {
+	Pages struct {
+		Used int64 `json:"used"`
+		Free int64 `json:"free"`
+	} `json:"pages"`
+	Slots map[string]struct {
+		Used  int64 `json:"used"`
+		Free  int64 `json:"free"`
+		Reqs  int64 `json:"reqs"`
+		Fails int64 `json:"fails"`
+	} `json:"slots"`
+}
+
 type Ssl struct { // added in version 6
 	Handshakes       int64 `json:"handshakes"`
 	HandshakesFailed int64 `json:"handshakes_failed"`
 	SessionReuses    int64 `json:"session_reuses"`
 }
 
-type HttpRequests struct {
+type ResolverZones map[string]struct {
+	Requests struct {
+		Name int64 `json:"name"`
+		Srv  int64 `json:"srv"`
+		Addr int64 `json:"addr"`
+	} `json:"requests"`
+	Responses struct {
+		Noerror  int64 `json:"noerror"`
+		Formerr  int64 `json:"formerr"`
+		Servfail int64 `json:"servfail"`
+		Nxdomain int64 `json:"nxdomain"`
+		Notimp   int64 `json:"notimp"`
+		Refused  int64 `json:"refused"`
+		Timedout int64 `json:"timedout"`
+		Unknown  int64 `json:"unknown"`
+	} `json:"responses"`
+}
+
+type HTTPRequests struct {
 	Total   int64 `json:"total"`
 	Current int64 `json:"current"`
 }
@@ -31,13 +62,21 @@ type ResponseStats struct {
 	Total        int64 `json:"total"`
 }
 
-type HttpServerZones map[string]struct {
+type HTTPServerZones map[string]struct {
 	Processing int           `json:"processing"`
 	Requests   int64         `json:"requests"`
 	Responses  ResponseStats `json:"responses"`
 	Discarded  *int64        `json:"discarded"` // added in version 6
 	Received   int64         `json:"received"`
 	Sent       int64         `json:"sent"`
+}
+
+type HTTPLocationZones map[string]struct {
+	Requests  int64         `json:"requests"`
+	Responses ResponseStats `json:"responses"`
+	Discarded *int64        `json:"discarded"` // added in version 6
+	Received  int64         `json:"received"`
+	Sent      int64         `json:"sent"`
 }
 
 type HealthCheckStats struct {
@@ -47,7 +86,7 @@ type HealthCheckStats struct {
 	LastPassed *bool `json:"last_passed"`
 }
 
-type HttpUpstreams map[string]struct {
+type HTTPUpstreams map[string]struct {
 	Peers []struct {
 		ID           *int             `json:"id"` // added in version 3
 		Server       string           `json:"server"`
@@ -119,7 +158,7 @@ type ExtendedHitStats struct {
 	BytesWritten     int64 `json:"bytes_written"`
 }
 
-type HttpCaches map[string]struct { // added in version 2
+type HTTPCaches map[string]struct { // added in version 2
 	Size        int64            `json:"size"`
 	MaxSize     int64            `json:"max_size"`
 	Cold        bool             `json:"cold"`
@@ -130,4 +169,12 @@ type HttpCaches map[string]struct { // added in version 2
 	Miss        ExtendedHitStats `json:"miss"`
 	Expired     ExtendedHitStats `json:"expired"`
 	Bypass      ExtendedHitStats `json:"bypass"`
+}
+
+type HTTPLimitReqs map[string]struct {
+	Passed         int64 `json:"passed"`
+	Delayed        int64 `json:"delayed"`
+	Rejected       int64 `json:"rejected"`
+	DelayedDryRun  int64 `json:"delayed_dry_run"`
+	RejectedDryRun int64 `json:"rejected_dry_run"`
 }

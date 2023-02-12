@@ -1,58 +1,51 @@
 package graylog
 
 import (
-	"bytes"
-	"compress/zlib"
 	"encoding/json"
-	"io"
-	"net"
-	"sync"
 	"testing"
+	"time"
 
-	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/influxdata/telegraf/metric"
 )
 
-func TestWrite(t *testing.T) {
-	var wg sync.WaitGroup
-	var wg2 sync.WaitGroup
-	wg.Add(1)
-	wg2.Add(1)
-	go UDPServer(t, &wg, &wg2)
-	wg2.Wait()
+func TestSerializer(t *testing.T) {
+	m1 := metric.New("testing",
+		map[string]string{
+			"verb": "GET",
+			"host": "hostname",
+		},
+		map[string]interface{}{
+			"full_message":  "full",
+			"short_message": "short",
+			"level":         "1",
+			"facility":      "demo",
+			"line":          "42",
+			"file":          "graylog.go",
+		},
+		time.Now(),
+	)
 
-	i := Graylog{
-		Servers: []string{"127.0.0.1:12201"},
+	graylog := Graylog{}
+	result, err := graylog.serialize(m1)
+
+	require.NoError(t, err)
+
+	for _, r := range result {
+		obj := make(map[string]interface{})
+		err = json.Unmarshal([]byte(r), &obj)
+		require.NoError(t, err)
+
+		require.Equal(t, obj["version"], "1.1")
+		require.Equal(t, obj["_name"], "testing")
+		require.Equal(t, obj["_verb"], "GET")
+		require.Equal(t, obj["host"], "hostname")
+		require.Equal(t, obj["full_message"], "full")
+		require.Equal(t, obj["short_message"], "short")
+		require.Equal(t, obj["level"], "1")
+		require.Equal(t, obj["facility"], "demo")
+		require.Equal(t, obj["line"], "42")
+		require.Equal(t, obj["file"], "graylog.go")
 	}
-	i.Connect()
-
-	metrics := testutil.MockMetrics()
-
-	i.Write(metrics)
-
-	wg.Wait()
-	i.Close()
-}
-
-type GelfObject map[string]interface{}
-
-func UDPServer(t *testing.T, wg *sync.WaitGroup, wg2 *sync.WaitGroup) {
-	serverAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12201")
-	udpServer, _ := net.ListenUDP("udp", serverAddr)
-	defer wg.Done()
-
-	bufR := make([]byte, 1024)
-	wg2.Done()
-	n, _, _ := udpServer.ReadFromUDP(bufR)
-
-	b := bytes.NewReader(bufR[0:n])
-	r, _ := zlib.NewReader(b)
-
-	bufW := bytes.NewBuffer(nil)
-	io.Copy(bufW, r)
-	r.Close()
-
-	var obj GelfObject
-	json.Unmarshal(bufW.Bytes(), &obj)
-	assert.Equal(t, obj["_value"], float64(1))
 }

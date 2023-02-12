@@ -43,27 +43,37 @@ type Collector struct {
 	coll           *serializer.Collection
 }
 
-func NewCollector(expire time.Duration, stringsAsLabel bool) *Collector {
+func NewCollector(expire time.Duration, stringsAsLabel bool, exportTimestamp bool) *Collector {
 	config := serializer.FormatConfig{}
 	if stringsAsLabel {
 		config.StringHandling = serializer.StringAsLabel
 	}
+
+	if exportTimestamp {
+		config.TimestampExport = serializer.ExportTimestamp
+	}
+
 	return &Collector{
 		expireDuration: expire,
 		coll:           serializer.NewCollection(config),
 	}
 }
 
-func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
+func (c *Collector) Describe(_ chan<- *prometheus.Desc) {
 	// Sending no descriptor at all marks the Collector as "unchecked",
 	// i.e. no checks will be performed at registration time, and the
 	// Collector may yield any Metric it sees fit in its Collect method.
-	return
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.Lock()
 	defer c.Unlock()
+
+	// Expire metrics, doing this on Collect ensure metrics are removed even if no
+	// new metrics are added to the output.
+	if c.expireDuration != 0 {
+		c.coll.Expire(time.Now(), c.expireDuration)
+	}
 
 	for _, family := range c.coll.GetProto() {
 		for _, metric := range family.Metric {
@@ -77,11 +87,14 @@ func (c *Collector) Add(metrics []telegraf.Metric) error {
 	defer c.Unlock()
 
 	for _, metric := range metrics {
-		c.coll.Add(metric)
+		c.coll.Add(metric, time.Now())
 	}
 
+	// Expire metrics, doing this on Add ensure metrics are removed even if no
+	// one is querying the data.
 	if c.expireDuration != 0 {
 		c.coll.Expire(time.Now(), c.expireDuration)
 	}
+
 	return nil
 }

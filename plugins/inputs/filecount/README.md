@@ -2,14 +2,20 @@
 
 Reports the number and total size of files in specified directories.
 
-### Configuration:
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Count files in a directory
 [[inputs.filecount]]
-  ## Directory to gather stats about.
-  ##   deprecated in 1.9; use the directories option
-  # directory = "/var/cache/apt/archives"
-
   ## Directories to gather stats about.
   ## This accept standard unit glob matching rules, but with the addition of
   ## ** as a "super asterisk". ie:
@@ -27,6 +33,9 @@ Reports the number and total size of files in specified directories.
   ## Only count regular files. Defaults to true.
   regular_only = true
 
+  ## Follow all symlinks while walking the directory tree. Defaults to false.
+  follow_symlinks = false
+
   ## Only count files that are at least this size. If size is
   ## a negative number, only count files that are smaller than the
   ## absolute value of size. Acceptable units are B, KiB, MiB, KB, ...
@@ -39,7 +48,7 @@ Reports the number and total size of files in specified directories.
   mtime = "0s"
 ```
 
-### Metrics
+## Metrics
 
 - filecount
   - tags:
@@ -48,9 +57,9 @@ Reports the number and total size of files in specified directories.
     - count (integer)
     - size_bytes (integer)
 
-### Example Output:
+## Example Output
 
-```
+```shell
 filecount,directory=/var/cache/apt count=7i,size_bytes=7438336i 1530034445000000000
 filecount,directory=/tmp count=17i,size_bytes=28934786i 1530034445000000000
 ```

@@ -1,6 +1,8 @@
-package seriesgrouper
+//go:generate ../../../tools/readme_config_includer/generator
+package merge
 
 import (
+	_ "embed"
 	"time"
 
 	"github.com/influxdata/telegraf"
@@ -8,14 +10,15 @@ import (
 	"github.com/influxdata/telegraf/plugins/aggregators"
 )
 
-const (
-	description  = "Merge metrics into multifield metrics by series key"
-	sampleConfig = ""
-)
+//go:embed sample.conf
+var sampleConfig string
 
 type Merge struct {
 	grouper *metric.SeriesGrouper
-	log     telegraf.Logger
+}
+
+func (*Merge) SampleConfig() string {
+	return sampleConfig
 }
 
 func (a *Merge) Init() error {
@@ -23,22 +26,8 @@ func (a *Merge) Init() error {
 	return nil
 }
 
-func (a *Merge) Description() string {
-	return description
-}
-
-func (a *Merge) SampleConfig() string {
-	return sampleConfig
-}
-
 func (a *Merge) Add(m telegraf.Metric) {
-	tags := m.Tags()
-	for _, field := range m.FieldList() {
-		err := a.grouper.Add(m.Name(), tags, m.Time(), field.Key, field.Value)
-		if err != nil {
-			a.log.Errorf("Error adding metric: %v", err)
-		}
-	}
+	a.grouper.AddMetric(m)
 }
 
 func (a *Merge) Push(acc telegraf.Accumulator) {

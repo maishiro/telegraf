@@ -5,7 +5,7 @@ vice versa.
 To convert from json to thrift,
 the json is unmarshalled, converted to zipkincore.Span structures, and
 marshalled into thrift binary protocol. The json must be in an array format (even if it only has one object),
-because the tool automatically tries to unmarshall the json into an array of structs.
+because the tool automatically tries to unmarshal the json into an array of structs.
 
 To convert from thrift to json,
 the opposite process must happen. The thrift binary data must be read into an array of
@@ -18,21 +18,21 @@ Usage:
 If `deserialize` is set to true (false by default), the tool will interpret the input file as
 thrift, and write it as json to the output file.
 Otherwise, the input file will be interpreted as json, and the output will be encoded as thrift.
-
-
 */
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
 
 	"github.com/apache/thrift/lib/go/thrift"
-	"github.com/openzipkin/zipkin-go-opentracing/thrift/gen-go/zipkincore"
+
+	"github.com/influxdata/telegraf/plugins/inputs/zipkin/codec/thrift/gen-go/zipkincore"
 )
 
 var (
@@ -51,7 +51,7 @@ func init() {
 
 func main() {
 	flag.Parse()
-	contents, err := ioutil.ReadFile(filename)
+	contents, err := os.ReadFile(filename)
 	if err != nil {
 		log.Fatalf("Error reading file: %v\n", err)
 	}
@@ -62,7 +62,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("%v\n", err)
 		}
-		if err := ioutil.WriteFile(outFileName, raw, 0644); err != nil {
+		if err := os.WriteFile(outFileName, raw, 0644); err != nil {
 			log.Fatalf("%v", err)
 		}
 	case "thrift":
@@ -70,7 +70,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("%v\n", err)
 		}
-		if err := ioutil.WriteFile(outFileName, raw, 0644); err != nil {
+		if err := os.WriteFile(outFileName, raw, 0644); err != nil {
 			log.Fatalf("%v", err)
 		}
 	default:
@@ -99,23 +99,21 @@ func jsonToZipkinThrift(jsonRaw []byte) ([]byte, error) {
 	}
 	zspans = append(zspans, spans...)
 
-	fmt.Println(spans)
-
 	buf := thrift.NewTMemoryBuffer()
-	transport := thrift.NewTBinaryProtocolTransport(buf)
+	transport := thrift.NewTBinaryProtocolConf(buf, nil)
 
-	if err = transport.WriteListBegin(thrift.STRUCT, len(spans)); err != nil {
+	if err = transport.WriteListBegin(context.Background(), thrift.STRUCT, len(spans)); err != nil {
 		return nil, fmt.Errorf("error in beginning thrift write: %v", err)
 	}
 
 	for _, span := range zspans {
-		err = span.Write(transport)
+		err = span.Write(context.Background(), transport)
 		if err != nil {
 			return nil, fmt.Errorf("error converting zipkin struct to thrift: %v", err)
 		}
 	}
 
-	if err = transport.WriteListEnd(); err != nil {
+	if err = transport.WriteListEnd(context.Background()); err != nil {
 		return nil, fmt.Errorf("error finishing thrift write: %v", err)
 	}
 
@@ -125,31 +123,27 @@ func jsonToZipkinThrift(jsonRaw []byte) ([]byte, error) {
 func thriftToJSONSpans(thriftData []byte) ([]byte, error) {
 	buffer := thrift.NewTMemoryBuffer()
 	if _, err := buffer.Write(thriftData); err != nil {
-		err = fmt.Errorf("error in buffer write: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error in buffer write: %w", err)
 	}
 
-	transport := thrift.NewTBinaryProtocolTransport(buffer)
-	_, size, err := transport.ReadListBegin()
+	transport := thrift.NewTBinaryProtocolConf(buffer, nil)
+	_, size, err := transport.ReadListBegin(context.Background())
 	if err != nil {
-		err = fmt.Errorf("error in ReadListBegin: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error in ReadListBegin: %w", err)
 	}
 
-	var spans []*zipkincore.Span
+	spans := make([]*zipkincore.Span, 0, size)
 	for i := 0; i < size; i++ {
 		zs := &zipkincore.Span{}
-		if err = zs.Read(transport); err != nil {
-			err = fmt.Errorf("Error reading into zipkin struct: %v", err)
-			return nil, err
+		if err = zs.Read(context.Background(), transport); err != nil {
+			return nil, fmt.Errorf("error reading into zipkin struct: %w", err)
 		}
 		spans = append(spans, zs)
 	}
 
-	err = transport.ReadListEnd()
+	err = transport.ReadListEnd(context.Background())
 	if err != nil {
-		err = fmt.Errorf("error ending thrift read: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error ending thrift read: %w", err)
 	}
 
 	out, _ := json.MarshalIndent(spans, "", "    ")

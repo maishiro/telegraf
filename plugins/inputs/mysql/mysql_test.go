@@ -1,77 +1,104 @@
 package mysql
 
 import (
-	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
-	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/assert"
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/testutil"
 )
 
-func TestMysqlDefaultsToLocal(t *testing.T) {
+const servicePort = "3306"
+
+func TestMysqlDefaultsToLocalIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	m := &Mysql{
-		Servers: []string{fmt.Sprintf("root@tcp(%s:3306)/", testutil.GetLocalHost())},
+	container := testutil.Container{
+		Image: "mysql",
+		Env: map[string]string{
+			"MYSQL_ALLOW_EMPTY_PASSWORD": "yes",
+		},
+		ExposedPorts: []string{servicePort},
+		WaitingFor: wait.ForAll(
+			wait.ForLog("/usr/sbin/mysqld: ready for connections").WithOccurrence(2),
+			wait.ForListeningPort(nat.Port(servicePort)),
+		),
 	}
 
-	var acc testutil.Accumulator
-	err := m.Gather(&acc)
-	require.NoError(t, err)
+	require.NoError(t, container.Start(), "failed to start container")
+	defer container.Terminate()
 
-	assert.True(t, acc.HasMeasurement("mysql"))
+	dsn := fmt.Sprintf("root@tcp(%s:%s)/", container.Address, container.Ports[servicePort])
+	m := &Mysql{
+		Servers: []config.Secret{config.NewSecret([]byte(dsn))},
+	}
+	require.NoError(t, m.Init())
+
+	var acc testutil.Accumulator
+	require.NoError(t, m.Gather(&acc))
+	require.Empty(t, acc.Errors)
+
+	require.True(t, acc.HasMeasurement("mysql"))
 }
 
-func TestMysqlMultipleInstances(t *testing.T) {
+func TestMysqlMultipleInstancesIntegration(t *testing.T) {
 	// Invoke Gather() from two separate configurations and
 	//  confirm they don't interfere with each other
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	testServer := "root@tcp(127.0.0.1:3306)/?tls=false"
-	m := &Mysql{
-		Servers:      []string{testServer},
-		IntervalSlow: "30s",
+
+	container := testutil.Container{
+		Image: "mysql",
+		Env: map[string]string{
+			"MYSQL_ALLOW_EMPTY_PASSWORD": "yes",
+		},
+		ExposedPorts: []string{servicePort},
+		WaitingFor: wait.ForAll(
+			wait.ForLog("/usr/sbin/mysqld: ready for connections").WithOccurrence(2),
+			wait.ForListeningPort(nat.Port(servicePort)),
+		),
 	}
 
-	var acc, acc2 testutil.Accumulator
-	err := m.Gather(&acc)
-	require.NoError(t, err)
-	assert.True(t, acc.HasMeasurement("mysql"))
+	require.NoError(t, container.Start(), "failed to start container")
+	defer container.Terminate()
+
+	dsn := fmt.Sprintf("root@tcp(%s:%s)/?tls=false", container.Address, container.Ports[servicePort])
+	m := &Mysql{
+		Servers:          []config.Secret{config.NewSecret([]byte(dsn))},
+		IntervalSlow:     config.Duration(30 * time.Second),
+		GatherGlobalVars: true,
+		MetricVersion:    2,
+	}
+	require.NoError(t, m.Init())
+
+	var acc testutil.Accumulator
+	require.NoError(t, m.Gather(&acc))
+	require.Empty(t, acc.Errors)
+	require.True(t, acc.HasMeasurement("mysql"))
 	// acc should have global variables
-	assert.True(t, acc.HasMeasurement("mysql_variables"))
+	require.True(t, acc.HasMeasurement("mysql_variables"))
 
 	m2 := &Mysql{
-		Servers: []string{testServer},
+		Servers:       []config.Secret{config.NewSecret([]byte(dsn))},
+		MetricVersion: 2,
 	}
-	err = m2.Gather(&acc2)
-	require.NoError(t, err)
-	assert.True(t, acc2.HasMeasurement("mysql"))
+	require.NoError(t, m2.Init())
+
+	var acc2 testutil.Accumulator
+	require.NoError(t, m2.Gather(&acc2))
+	require.Empty(t, acc.Errors)
+	require.True(t, acc2.HasMeasurement("mysql"))
 	// acc2 should not have global variables
-	assert.False(t, acc2.HasMeasurement("mysql_variables"))
-}
-
-func TestMysqlMultipleInits(t *testing.T) {
-	m := &Mysql{
-		IntervalSlow: "30s",
-	}
-	m2 := &Mysql{}
-
-	m.InitMysql()
-	assert.True(t, m.initDone)
-	assert.False(t, m2.initDone)
-	assert.Equal(t, m.scanIntervalSlow, uint32(30))
-	assert.Equal(t, m2.scanIntervalSlow, uint32(0))
-
-	m2.InitMysql()
-	assert.True(t, m.initDone)
-	assert.True(t, m2.initDone)
-	assert.Equal(t, m.scanIntervalSlow, uint32(30))
-	assert.Equal(t, m2.scanIntervalSlow, uint32(0))
+	require.False(t, acc2.HasMeasurement("mysql_variables"))
 }
 
 func TestMysqlGetDSNTag(t *testing.T) {
@@ -135,69 +162,196 @@ func TestMysqlGetDSNTag(t *testing.T) {
 
 func TestMysqlDNSAddTimeout(t *testing.T) {
 	tests := []struct {
+		name   string
 		input  string
 		output string
 	}{
 		{
+			"empty",
 			"",
 			"tcp(127.0.0.1:3306)/?timeout=5s",
 		},
 		{
+			"no timeout",
 			"tcp(192.168.1.1:3306)/",
 			"tcp(192.168.1.1:3306)/?timeout=5s",
 		},
 		{
+			"no timeout with credentials",
 			"root:passwd@tcp(192.168.1.1:3306)/?tls=false",
 			"root:passwd@tcp(192.168.1.1:3306)/?timeout=5s&tls=false",
 		},
 		{
+			"with timeout and credentials",
 			"root:passwd@tcp(192.168.1.1:3306)/?tls=false&timeout=10s",
 			"root:passwd@tcp(192.168.1.1:3306)/?timeout=10s&tls=false",
 		},
 		{
+			"no timeout different IP",
 			"tcp(10.150.1.123:3306)/",
 			"tcp(10.150.1.123:3306)/?timeout=5s",
 		},
 		{
+			"no timeout with bracket credentials",
 			"root:@!~(*&$#%(&@#(@&#Password@tcp(10.150.1.123:3306)/",
 			"root:@!~(*&$#%(&@#(@&#Password@tcp(10.150.1.123:3306)/?timeout=5s",
 		},
 		{
+			"no timeout with strange credentials",
 			"root:Test3a#@!@tcp(10.150.1.123:3306)/",
 			"root:Test3a#@!@tcp(10.150.1.123:3306)/?timeout=5s",
 		},
 	}
 
-	for _, test := range tests {
-		output, _ := dsnAddTimeout(test.input)
-		if output != test.output {
-			t.Errorf("Expected %s, got %s\n", test.output, output)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Mysql{
+				Servers: []config.Secret{config.NewSecret([]byte(tt.input))},
+			}
+			require.NoError(t, m.Init())
+			equal, err := m.Servers[0].EqualTo([]byte(tt.output))
+			require.NoError(t, err)
+			require.True(t, equal)
+		})
 	}
 }
-func TestParseValue(t *testing.T) {
+
+func TestGatherGlobalVariables(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	m := Mysql{
+		Log:           testutil.Logger{},
+		MetricVersion: 2,
+	}
+	require.NoError(t, m.Init())
+
+	columns := []string{"Variable_name", "Value"}
+	measurement := "mysql_variables"
+
+	type fields []struct {
+		key         string
+		rawValue    string
+		parsedValue interface{}
+	}
+	type tags map[string]string
 	testCases := []struct {
-		rawByte   sql.RawBytes
-		output    interface{}
-		boolValue bool
+		name   string
+		fields fields
+		tags   tags
 	}{
-		{sql.RawBytes("123"), int64(123), true},
-		{sql.RawBytes("abc"), "abc", true},
-		{sql.RawBytes("10.1"), 10.1, true},
-		{sql.RawBytes("ON"), 1, true},
-		{sql.RawBytes("OFF"), 0, true},
-		{sql.RawBytes("NO"), 0, true},
-		{sql.RawBytes("YES"), 1, true},
-		{sql.RawBytes("No"), 0, true},
-		{sql.RawBytes("Yes"), 1, true},
-		{sql.RawBytes(""), nil, false},
+		{
+			"basic variables",
+			fields{
+				{"__test__string_variable", "text", "text"},
+				{"__test__int_variable", "5", int64(5)},
+				{"__test__off_variable", "OFF", int64(0)},
+				{"__test__on_variable", "ON", int64(1)},
+				{"__test__empty_variable", "", nil},
+			},
+			tags{"server": "127.0.0.1:3306"},
+		},
+		{
+			"version tag is present",
+			fields{
+				{"__test__string_variable", "text", "text"},
+				{"version", "8.0.27-0ubuntu0.20.04.1", "8.0.27-0ubuntu0.20.04.1"},
+			},
+			tags{"server": "127.0.0.1:3306", "version": "8.0.27-0ubuntu0.20.04.1"},
+		},
+
+		{"", fields{{"delay_key_write", "OFF", "OFF"}}, nil},
+		{"", fields{{"delay_key_write", "ON", "ON"}}, nil},
+		{"", fields{{"delay_key_write", "ALL", "ALL"}}, nil},
+		{"", fields{{"enforce_gtid_consistency", "OFF", "OFF"}}, nil},
+		{"", fields{{"enforce_gtid_consistency", "ON", "ON"}}, nil},
+		{"", fields{{"enforce_gtid_consistency", "WARN", "WARN"}}, nil},
+		{"", fields{{"event_scheduler", "NO", "NO"}}, nil},
+		{"", fields{{"event_scheduler", "YES", "YES"}}, nil},
+		{"", fields{{"event_scheduler", "DISABLED", "DISABLED"}}, nil},
+		{"", fields{{"have_ssl", "DISABLED", int64(0)}}, nil},
+		{"", fields{{"have_ssl", "YES", int64(1)}}, nil},
+		{"", fields{{"have_symlink", "NO", int64(0)}}, nil},
+		{"", fields{{"have_symlink", "DISABLED", int64(0)}}, nil},
+		{"", fields{{"have_symlink", "YES", int64(1)}}, nil},
+		{"", fields{{"session_track_gtids", "OFF", "OFF"}}, nil},
+		{"", fields{{"session_track_gtids", "OWN_GTID", "OWN_GTID"}}, nil},
+		{"", fields{{"session_track_gtids", "ALL_GTIDS", "ALL_GTIDS"}}, nil},
+		{"", fields{{"session_track_transaction_info", "OFF", "OFF"}}, nil},
+		{"", fields{{"session_track_transaction_info", "STATE", "STATE"}}, nil},
+		{"", fields{{"session_track_transaction_info", "CHARACTERISTICS", "CHARACTERISTICS"}}, nil},
+		{"", fields{{"ssl_fips_mode", "0", "0"}}, nil}, // TODO: map this to OFF or vice versa using integers
+		{"", fields{{"ssl_fips_mode", "1", "1"}}, nil}, // TODO: map this to ON or vice versa using integers
+		{"", fields{{"ssl_fips_mode", "2", "2"}}, nil}, // TODO: map this to STRICT or vice versa using integers
+		{"", fields{{"ssl_fips_mode", "OFF", "OFF"}}, nil},
+		{"", fields{{"ssl_fips_mode", "ON", "ON"}}, nil},
+		{"", fields{{"ssl_fips_mode", "STRICT", "STRICT"}}, nil},
+		{"", fields{{"use_secondary_engine", "OFF", "OFF"}}, nil},
+		{"", fields{{"use_secondary_engine", "ON", "ON"}}, nil},
+		{"", fields{{"use_secondary_engine", "FORCED", "FORCED"}}, nil},
+		{"", fields{{"transaction_write_set_extraction", "OFF", "OFF"}}, nil},
+		{"", fields{{"transaction_write_set_extraction", "MURMUR32", "MURMUR32"}}, nil},
+		{"", fields{{"transaction_write_set_extraction", "XXHASH64", "XXHASH64"}}, nil},
+		{"", fields{{"slave_skip_errors", "OFF", "OFF"}}, nil},
+		{"", fields{{"slave_skip_errors", "0", "0"}}, nil},
+		{"", fields{{"slave_skip_errors", "1007,1008,1050", "1007,1008,1050"}}, nil},
+		{"", fields{{"slave_skip_errors", "all", "all"}}, nil},
+		{"", fields{{"slave_skip_errors", "ddl_exist_errors", "ddl_exist_errors"}}, nil},
+		{"", fields{{"gtid_mode", "OFF", int64(0)}}, nil},
+		{"", fields{{"gtid_mode", "OFF_PERMISSIVE", int64(0)}}, nil},
+		{"", fields{{"gtid_mode", "ON", int64(1)}}, nil},
+		{"", fields{{"gtid_mode", "ON_PERMISSIVE", int64(1)}}, nil},
 	}
-	for _, cases := range testCases {
-		if got, ok := parseValue(cases.rawByte); got != cases.output && ok != cases.boolValue {
-			t.Errorf("for %s wanted %t, got %t", string(cases.rawByte), cases.output, got)
+
+	for i, testCase := range testCases {
+		if testCase.name == "" {
+			testCase.name = fmt.Sprintf("#%d", i)
 		}
+
+		t.Run(testCase.name, func(t *testing.T) {
+			rows := sqlmock.NewRows(columns)
+			for _, field := range testCase.fields {
+				rows.AddRow(field.key, field.rawValue)
+			}
+
+			mock.ExpectQuery(globalVariablesQuery).WillReturnRows(rows).RowsWillBeClosed()
+
+			acc := &testutil.Accumulator{}
+
+			err := m.gatherGlobalVariables(db, getDSNTag("test"), acc)
+			require.NoErrorf(t, err, "err on gatherGlobalVariables (test case %q)", testCase.name)
+
+			foundFields := map[string]bool{}
+
+			for _, metric := range acc.Metrics {
+				require.Equalf(t, measurement, metric.Measurement, "wrong measurement (test case %q)", testCase.name)
+
+				if testCase.tags != nil {
+					require.Equalf(t, testCase.tags, tags(metric.Tags), "wrong tags (test case %q)", testCase.name)
+				}
+
+				for key, value := range metric.Fields {
+					for _, field := range testCase.fields {
+						if field.key == key {
+							require.Falsef(t, foundFields[key], "field %s observed multiple times (test case %q)", key, testCase.name)
+							require.Equalf(t, field.parsedValue, value, "wrong value for field %s (test case %q)", key, testCase.name)
+							foundFields[key] = true
+							break
+						}
+					}
+
+					require.Truef(t, foundFields[key], "unexpected field %s=%v (test case %q)", key, value, testCase.name)
+				}
+			}
+
+			for _, field := range testCase.fields {
+				require.Truef(t, foundFields[field.key], "missing field %s=%v (test case %q)", field.key, field.parsedValue, testCase.name)
+			}
+		})
 	}
 }
+
 func TestNewNamespace(t *testing.T) {
 	testCases := []struct {
 		words     []string

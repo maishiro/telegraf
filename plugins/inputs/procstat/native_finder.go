@@ -2,24 +2,25 @@ package procstat
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/shirou/gopsutil/process"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
-//NativeFinder uses gopsutil to find processes
+// NativeFinder uses gopsutil to find processes
 type NativeFinder struct {
 }
 
-//NewNativeFinder ...
+// NewNativeFinder ...
 func NewNativeFinder() (PIDFinder, error) {
 	return &NativeFinder{}, nil
 }
 
-//Uid will return all pids for the given user
-func (pg *NativeFinder) Uid(user string) ([]PID, error) {
+// Uid will return all pids for the given user
+func (pg *NativeFinder) UID(user string) ([]PID, error) {
 	var dst []PID
 	procs, err := process.Processes()
 	if err != nil {
@@ -39,19 +40,56 @@ func (pg *NativeFinder) Uid(user string) ([]PID, error) {
 	return dst, nil
 }
 
-//PidFile returns the pid from the pid file given.
+// PidFile returns the pid from the pid file given.
 func (pg *NativeFinder) PidFile(path string) ([]PID, error) {
 	var pids []PID
-	pidString, err := ioutil.ReadFile(path)
+	pidString, err := os.ReadFile(path)
 	if err != nil {
 		return pids, fmt.Errorf("Failed to read pidfile '%s'. Error: '%s'",
 			path, err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidString)))
+	pid, err := strconv.ParseInt(strings.TrimSpace(string(pidString)), 10, 32)
 	if err != nil {
 		return pids, err
 	}
 	pids = append(pids, PID(pid))
 	return pids, nil
+}
 
+// FullPattern matches on the command line when the process was executed
+func (pg *NativeFinder) FullPattern(pattern string) ([]PID, error) {
+	var pids []PID
+	regxPattern, err := regexp.Compile(pattern)
+	if err != nil {
+		return pids, err
+	}
+	procs, err := pg.FastProcessList()
+	if err != nil {
+		return pids, err
+	}
+	for _, p := range procs {
+		cmd, err := p.Cmdline()
+		if err != nil {
+			//skip, this can be caused by the pid no longer existing
+			//or you having no permissions to access it
+			continue
+		}
+		if regxPattern.MatchString(cmd) {
+			pids = append(pids, PID(p.Pid))
+		}
+	}
+	return pids, err
+}
+
+func (pg *NativeFinder) FastProcessList() ([]*process.Process, error) {
+	pids, err := process.Pids()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]*process.Process, 0, len(pids))
+	for _, pid := range pids {
+		result = append(result, &process.Process{Pid: pid})
+	}
+	return result, nil
 }

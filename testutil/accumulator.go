@@ -9,8 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/telegraf"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/influxdata/telegraf"
 )
 
 var (
@@ -18,8 +19,8 @@ var (
 )
 
 func newTrackingID() telegraf.TrackingID {
-	atomic.AddUint64(&lastID, 1)
-	return telegraf.TrackingID(lastID)
+	id := atomic.AddUint64(&lastID, 1)
+	return telegraf.TrackingID(id)
 }
 
 // Metric defines a single point measurement
@@ -54,6 +55,8 @@ func (a *Accumulator) NMetrics() uint64 {
 	return atomic.LoadUint64(&a.nMetrics)
 }
 
+// GetTelegrafMetrics returns all the metrics collected by the accumulator
+// If you are getting race conditions here then you are not waiting for all of your metrics to arrive: see Wait()
 func (a *Accumulator) GetTelegrafMetrics() []telegraf.Metric {
 	metrics := []telegraf.Metric{}
 	for _, m := range a.Metrics {
@@ -76,7 +79,7 @@ func (a *Accumulator) ClearMetrics() {
 	a.Metrics = make([]*Metric, 0)
 }
 
-func (a *Accumulator) addFields(
+func (a *Accumulator) addMeasurement(
 	measurement string,
 	tags map[string]string,
 	fields map[string]interface{},
@@ -111,13 +114,11 @@ func (a *Accumulator) addFields(
 	if len(timestamp) > 0 {
 		t = timestamp[0]
 	} else {
-		t = time.Now()
 		if a.TimeFunc == nil {
 			t = time.Now()
 		} else {
 			t = a.TimeFunc()
 		}
-
 	}
 
 	if a.debug {
@@ -146,7 +147,7 @@ func (a *Accumulator) AddFields(
 	tags map[string]string,
 	timestamp ...time.Time,
 ) {
-	a.addFields(measurement, tags, fields, telegraf.Untyped, timestamp...)
+	a.addMeasurement(measurement, tags, fields, telegraf.Untyped, timestamp...)
 }
 
 func (a *Accumulator) AddCounter(
@@ -155,7 +156,7 @@ func (a *Accumulator) AddCounter(
 	tags map[string]string,
 	timestamp ...time.Time,
 ) {
-	a.addFields(measurement, tags, fields, telegraf.Counter, timestamp...)
+	a.addMeasurement(measurement, tags, fields, telegraf.Counter, timestamp...)
 }
 
 func (a *Accumulator) AddGauge(
@@ -164,12 +165,12 @@ func (a *Accumulator) AddGauge(
 	tags map[string]string,
 	timestamp ...time.Time,
 ) {
-	a.addFields(measurement, tags, fields, telegraf.Gauge, timestamp...)
+	a.addMeasurement(measurement, tags, fields, telegraf.Gauge, timestamp...)
 }
 
 func (a *Accumulator) AddMetrics(metrics []telegraf.Metric) {
 	for _, m := range metrics {
-		a.addFields(m.Name(), m.Tags(), m.Fields(), m.Type(), m.Time())
+		a.addMeasurement(m.Name(), m.Tags(), m.Fields(), m.Type(), m.Time())
 	}
 }
 
@@ -179,7 +180,7 @@ func (a *Accumulator) AddSummary(
 	tags map[string]string,
 	timestamp ...time.Time,
 ) {
-	a.addFields(measurement, tags, fields, telegraf.Summary, timestamp...)
+	a.addMeasurement(measurement, tags, fields, telegraf.Summary, timestamp...)
 }
 
 func (a *Accumulator) AddHistogram(
@@ -188,14 +189,14 @@ func (a *Accumulator) AddHistogram(
 	tags map[string]string,
 	timestamp ...time.Time,
 ) {
-	a.addFields(measurement, tags, fields, telegraf.Histogram, timestamp...)
+	a.addMeasurement(measurement, tags, fields, telegraf.Histogram, timestamp...)
 }
 
 func (a *Accumulator) AddMetric(m telegraf.Metric) {
-	a.addFields(m.Name(), m.Tags(), m.Fields(), m.Type(), m.Time())
+	a.addMeasurement(m.Name(), m.Tags(), m.Fields(), m.Type(), m.Time())
 }
 
-func (a *Accumulator) WithTracking(maxTracked int) telegraf.TrackingAccumulator {
+func (a *Accumulator) WithTracking(_ int) telegraf.TrackingAccumulator {
 	return a
 }
 
@@ -212,9 +213,11 @@ func (a *Accumulator) AddTrackingMetricGroup(group []telegraf.Metric) telegraf.T
 }
 
 func (a *Accumulator) Delivered() <-chan telegraf.DeliveryInfo {
+	a.Lock()
 	if a.delivered == nil {
 		a.delivered = make(chan telegraf.DeliveryInfo)
 	}
+	a.Unlock()
 	return a.delivered
 }
 
@@ -231,12 +234,10 @@ func (a *Accumulator) AddError(err error) {
 	a.Unlock()
 }
 
-func (a *Accumulator) SetPrecision(precision time.Duration) {
-	return
+func (a *Accumulator) SetPrecision(_ time.Duration) {
 }
 
 func (a *Accumulator) DisablePrecision() {
-	return
 }
 
 func (a *Accumulator) Debug() bool {
@@ -295,7 +296,7 @@ func (a *Accumulator) TagValue(measurement string, key string) string {
 	return ""
 }
 
-// Calls the given Gather function and returns the first error found.
+// GatherError calls the given Gather function and returns the first error found.
 func (a *Accumulator) GatherError(gf func(telegraf.Accumulator) error) error {
 	if err := gf(a); err != nil {
 		return err
@@ -323,13 +324,13 @@ func (a *Accumulator) NFields() int {
 // Wait waits for the given number of metrics to be added to the accumulator.
 func (a *Accumulator) Wait(n int) {
 	a.Lock()
+	defer a.Unlock()
 	if a.Cond == nil {
 		a.Cond = sync.NewCond(&a.Mutex)
 	}
 	for int(a.NMetrics()) < n {
 		a.Cond.Wait()
 	}
-	a.Unlock()
 }
 
 // WaitError waits for the given number of errors to be added to the accumulator.
@@ -361,7 +362,13 @@ func (a *Accumulator) AssertContainsTaggedFields(
 			return
 		}
 	}
-	msg := fmt.Sprintf("unknown measurement %s with tags %v", measurement, tags)
+	// We've failed. spit out some debug logging
+	for _, p := range a.Metrics {
+		if p.Measurement == measurement {
+			t.Log("measurement", p.Measurement, "tags", p.Tags, "fields", p.Fields)
+		}
+	}
+	msg := fmt.Sprintf("unknown measurement %q with tags %v", measurement, tags)
 	assert.Fail(t, msg)
 }
 
@@ -385,9 +392,7 @@ func (a *Accumulator) AssertDoesNotContainsTaggedFields(
 			assert.Fail(t, msg)
 		}
 	}
-	return
 }
-
 func (a *Accumulator) AssertContainsFields(
 	t *testing.T,
 	measurement string,
@@ -401,7 +406,7 @@ func (a *Accumulator) AssertContainsFields(
 			return
 		}
 	}
-	msg := fmt.Sprintf("unknown measurement %s", measurement)
+	msg := fmt.Sprintf("unknown measurement %q", measurement)
 	assert.Fail(t, msg)
 }
 
@@ -524,7 +529,7 @@ func (a *Accumulator) HasInt32Field(measurement string, field string) bool {
 	return false
 }
 
-// HasStringField returns true if the measurement has an String value
+// HasStringField returns true if the measurement has a String value
 func (a *Accumulator) HasStringField(measurement string, field string) bool {
 	a.Lock()
 	defer a.Unlock()
@@ -699,14 +704,14 @@ func (a *Accumulator) StringField(measurement string, field string) (string, boo
 }
 
 // BoolField returns the bool value of the given measurement and field or false.
-func (a *Accumulator) BoolField(measurement string, field string) (bool, bool) {
+func (a *Accumulator) BoolField(measurement string, field string) (v bool, ok bool) {
 	a.Lock()
 	defer a.Unlock()
 	for _, p := range a.Metrics {
 		if p.Measurement == measurement {
 			for fieldname, value := range p.Fields {
 				if fieldname == field {
-					v, ok := value.(bool)
+					v, ok = value.(bool)
 					return v, ok
 				}
 			}
@@ -715,3 +720,22 @@ func (a *Accumulator) BoolField(measurement string, field string) (bool, bool) {
 
 	return false, false
 }
+
+// NopAccumulator is used for benchmarking to isolate the plugin from the internal
+// telegraf accumulator machinery.
+type NopAccumulator struct{}
+
+func (n *NopAccumulator) AddFields(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
+}
+func (n *NopAccumulator) AddGauge(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
+}
+func (n *NopAccumulator) AddCounter(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
+}
+func (n *NopAccumulator) AddSummary(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
+}
+func (n *NopAccumulator) AddHistogram(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
+}
+func (n *NopAccumulator) AddMetric(telegraf.Metric)                       {}
+func (n *NopAccumulator) SetPrecision(_ time.Duration)                    {}
+func (n *NopAccumulator) AddError(_ error)                                {}
+func (n *NopAccumulator) WithTracking(_ int) telegraf.TrackingAccumulator { return nil }

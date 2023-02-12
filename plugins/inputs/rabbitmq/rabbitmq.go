@@ -1,29 +1,35 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package rabbitmq
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/filter"
-	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
-// DefaultUsername will set a default value that corrasponds to the default
+//go:embed sample.conf
+var sampleConfig string
+
+// DefaultUsername will set a default value that corresponds to the default
 // value used by Rabbitmq
 const DefaultUsername = "guest"
 
-// DefaultPassword will set a default value that corrasponds to the default
+// DefaultPassword will set a default value that corresponds to the default
 // value used by Rabbitmq
 const DefaultPassword = "guest"
 
-// DefaultURL will set a default value that corrasponds to the default value
+// DefaultURL will set a default value that corresponds to the default value
 // used by Rabbitmq
 const DefaultURL = "http://localhost:15672"
 
@@ -35,27 +41,30 @@ const DefaultClientTimeout = 4
 // see the sample config for further details
 type RabbitMQ struct {
 	URL      string `toml:"url"`
-	Name     string `toml:"name"`
+	Name     string `toml:"name" deprecated:"1.3.0;use 'tags' instead"`
 	Username string `toml:"username"`
 	Password string `toml:"password"`
 	tls.ClientConfig
 
-	ResponseHeaderTimeout internal.Duration `toml:"header_timeout"`
-	ClientTimeout         internal.Duration `toml:"client_timeout"`
+	ResponseHeaderTimeout config.Duration `toml:"header_timeout"`
+	ClientTimeout         config.Duration `toml:"client_timeout"`
 
 	Nodes     []string `toml:"nodes"`
-	Queues    []string `toml:"queues"`
+	Queues    []string `toml:"queues" deprecated:"1.6.0;use 'queue_name_include' instead"`
 	Exchanges []string `toml:"exchanges"`
 
+	MetricInclude             []string `toml:"metric_include"`
+	MetricExclude             []string `toml:"metric_exclude"`
 	QueueInclude              []string `toml:"queue_name_include"`
 	QueueExclude              []string `toml:"queue_name_exclude"`
 	FederationUpstreamInclude []string `toml:"federation_upstream_include"`
 	FederationUpstreamExclude []string `toml:"federation_upstream_exclude"`
 
-	Client *http.Client `toml:"-"`
+	Log telegraf.Logger `toml:"-"`
 
-	filterCreated     bool
+	client            *http.Client
 	excludeEveryQueue bool
+	metricFilter      filter.Filter
 	queueFilter       filter.Filter
 	upstreamFilter    filter.Filter
 }
@@ -121,17 +130,20 @@ type QueueTotals struct {
 
 // Queue ...
 type Queue struct {
-	QueueTotals         // just to not repeat the same code
-	MessageStats        `json:"message_stats"`
-	Memory              int64
-	Consumers           int64
-	ConsumerUtilisation float64 `json:"consumer_utilisation"`
-	Name                string
-	Node                string
-	Vhost               string
-	Durable             bool
-	AutoDelete          bool   `json:"auto_delete"`
-	IdleSince           string `json:"idle_since"`
+	QueueTotals            // just to not repeat the same code
+	MessageStats           `json:"message_stats"`
+	Memory                 int64
+	Consumers              int64
+	ConsumerUtilisation    float64 `json:"consumer_utilisation"`
+	Name                   string
+	Node                   string
+	Vhost                  string
+	Durable                bool
+	AutoDelete             bool     `json:"auto_delete"`
+	IdleSince              string   `json:"idle_since"`
+	SlaveNodes             []string `json:"slave_nodes"`
+	SynchronisedSlaveNodes []string `json:"synchronised_slave_nodes"`
+	HeadMessageTimestamp   *int64   `json:"head_message_timestamp"`
 }
 
 // Node ...
@@ -155,17 +167,17 @@ type Node struct {
 	Uptime                   int64   `json:"uptime"`
 	MnesiaDiskTxCount        int64   `json:"mnesia_disk_tx_count"`
 	MnesiaDiskTxCountDetails Details `json:"mnesia_disk_tx_count_details"`
-	MnesiaRamTxCount         int64   `json:"mnesia_ram_tx_count"`
-	MnesiaRamTxCountDetails  Details `json:"mnesia_ram_tx_count_details"`
+	MnesiaRAMTxCount         int64   `json:"mnesia_ram_tx_count"`
+	MnesiaRAMTxCountDetails  Details `json:"mnesia_ram_tx_count_details"`
 	GcNum                    int64   `json:"gc_num"`
 	GcNumDetails             Details `json:"gc_num_details"`
 	GcBytesReclaimed         int64   `json:"gc_bytes_reclaimed"`
 	GcBytesReclaimedDetails  Details `json:"gc_bytes_reclaimed_details"`
-	IoReadAvgTime            int64   `json:"io_read_avg_time"`
+	IoReadAvgTime            float64 `json:"io_read_avg_time"`
 	IoReadAvgTimeDetails     Details `json:"io_read_avg_time_details"`
 	IoReadBytes              int64   `json:"io_read_bytes"`
 	IoReadBytesDetails       Details `json:"io_read_bytes_details"`
-	IoWriteAvgTime           int64   `json:"io_write_avg_time"`
+	IoWriteAvgTime           float64 `json:"io_write_avg_time"`
 	IoWriteAvgTimeDetails    Details `json:"io_write_avg_time_details"`
 	IoWriteBytes             int64   `json:"io_write_bytes"`
 	IoWriteBytesDetails      Details `json:"io_write_bytes_details"`
@@ -224,85 +236,44 @@ type MemoryResponse struct {
 
 // Memory details
 type Memory struct {
-	ConnectionReaders   int64 `json:"connection_readers"`
-	ConnectionWriters   int64 `json:"connection_writers"`
-	ConnectionChannels  int64 `json:"connection_channels"`
-	ConnectionOther     int64 `json:"connection_other"`
-	QueueProcs          int64 `json:"queue_procs"`
-	QueueSlaveProcs     int64 `json:"queue_slave_procs"`
-	Plugins             int64 `json:"plugins"`
-	OtherProc           int64 `json:"other_proc"`
-	Metrics             int64 `json:"metrics"`
-	MgmtDb              int64 `json:"mgmt_db"`
-	Mnesia              int64 `json:"mnesia"`
-	OtherEts            int64 `json:"other_ets"`
-	Binary              int64 `json:"binary"`
-	MsgIndex            int64 `json:"msg_index"`
-	Code                int64 `json:"code"`
-	Atom                int64 `json:"atom"`
-	OtherSystem         int64 `json:"other_system"`
-	AllocatedUnused     int64 `json:"allocated_unused"`
-	ReservedUnallocated int64 `json:"reserved_unallocated"`
-	Total               int64 `json:"total"`
+	ConnectionReaders   int64       `json:"connection_readers"`
+	ConnectionWriters   int64       `json:"connection_writers"`
+	ConnectionChannels  int64       `json:"connection_channels"`
+	ConnectionOther     int64       `json:"connection_other"`
+	QueueProcs          int64       `json:"queue_procs"`
+	QueueSlaveProcs     int64       `json:"queue_slave_procs"`
+	Plugins             int64       `json:"plugins"`
+	OtherProc           int64       `json:"other_proc"`
+	Metrics             int64       `json:"metrics"`
+	MgmtDb              int64       `json:"mgmt_db"`
+	Mnesia              int64       `json:"mnesia"`
+	OtherEts            int64       `json:"other_ets"`
+	Binary              int64       `json:"binary"`
+	MsgIndex            int64       `json:"msg_index"`
+	Code                int64       `json:"code"`
+	Atom                int64       `json:"atom"`
+	OtherSystem         int64       `json:"other_system"`
+	AllocatedUnused     int64       `json:"allocated_unused"`
+	ReservedUnallocated int64       `json:"reserved_unallocated"`
+	Total               interface{} `json:"total"`
+}
+
+// Error response
+type ErrorResponse struct {
+	Error  string `json:"error"`
+	Reason string `json:"reason"`
 }
 
 // gatherFunc ...
 type gatherFunc func(r *RabbitMQ, acc telegraf.Accumulator)
 
-var gatherFunctions = []gatherFunc{gatherOverview, gatherNodes, gatherQueues, gatherExchanges, gatherFederationLinks}
-
-var sampleConfig = `
-  ## Management Plugin url. (default: http://localhost:15672)
-  # url = "http://localhost:15672"
-  ## Tag added to rabbitmq_overview series; deprecated: use tags
-  # name = "rmq-server-1"
-  ## Credentials
-  # username = "guest"
-  # password = "guest"
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-  ## Use TLS but skip chain & host verification
-  # insecure_skip_verify = false
-
-  ## Optional request timeouts
-  ##
-  ## ResponseHeaderTimeout, if non-zero, specifies the amount of time to wait
-  ## for a server's response headers after fully writing the request.
-  # header_timeout = "3s"
-  ##
-  ## client_timeout specifies a time limit for requests made by this client.
-  ## Includes connection time, any redirects, and reading the response body.
-  # client_timeout = "4s"
-
-  ## A list of nodes to gather as the rabbitmq_node measurement. If not
-  ## specified, metrics for all nodes are gathered.
-  # nodes = ["rabbit@node1", "rabbit@node2"]
-
-  ## A list of queues to gather as the rabbitmq_queue measurement. If not
-  ## specified, metrics for all queues are gathered.
-  # queues = ["telegraf"]
-
-  ## A list of exchanges to gather as the rabbitmq_exchange measurement. If not
-  ## specified, metrics for all exchanges are gathered.
-  # exchanges = ["telegraf"]
-
-  ## Queues to include and exclude. Globs accepted.
-  ## Note that an empty array for both will include all queues
-  queue_name_include = []
-  queue_name_exclude = []
-
-  ## Federation upstreams include and exclude when gathering the rabbitmq_federation measurement.
-  ## If neither are specified, metrics for all federation upstreams are gathered.
-  ## Federation link metrics will only be gathered for queues and exchanges
-  ## whose non-federation metrics will be collected (e.g a queue excluded
-  ## by the 'queue_name_exclude' option will also be excluded from federation).
-  ## Globs accepted.
-  # federation_upstream_include = ["dataCentre-*"]
-  # federation_upstream_exclude = []
-`
+var gatherFunctions = map[string]gatherFunc{
+	"exchange":   gatherExchanges,
+	"federation": gatherFederationLinks,
+	"node":       gatherNodes,
+	"overview":   gatherOverview,
+	"queue":      gatherQueues,
+}
 
 func boolToInt(b bool) int64 {
 	if b {
@@ -311,49 +282,51 @@ func boolToInt(b bool) int64 {
 	return 0
 }
 
-// SampleConfig ...
-func (r *RabbitMQ) SampleConfig() string {
+func (*RabbitMQ) SampleConfig() string {
 	return sampleConfig
 }
 
-// Description ...
-func (r *RabbitMQ) Description() string {
-	return "Reads metrics from RabbitMQ servers via the Management Plugin"
+func (r *RabbitMQ) Init() error {
+	var err error
+
+	// Create gather filters
+	if err := r.createQueueFilter(); err != nil {
+		return err
+	}
+	if err := r.createUpstreamFilter(); err != nil {
+		return err
+	}
+
+	// Create a filter for the metrics
+	if r.metricFilter, err = filter.NewIncludeExcludeFilter(r.MetricInclude, r.MetricExclude); err != nil {
+		return err
+	}
+
+	tlsCfg, err := r.ClientConfig.TLSConfig()
+	if err != nil {
+		return err
+	}
+	tr := &http.Transport{
+		ResponseHeaderTimeout: time.Duration(r.ResponseHeaderTimeout),
+		TLSClientConfig:       tlsCfg,
+	}
+	r.client = &http.Client{
+		Transport: tr,
+		Timeout:   time.Duration(r.ClientTimeout),
+	}
+
+	return nil
 }
 
 // Gather ...
 func (r *RabbitMQ) Gather(acc telegraf.Accumulator) error {
-	if r.Client == nil {
-		tlsCfg, err := r.ClientConfig.TLSConfig()
-		if err != nil {
-			return err
-		}
-		tr := &http.Transport{
-			ResponseHeaderTimeout: r.ResponseHeaderTimeout.Duration,
-			TLSClientConfig:       tlsCfg,
-		}
-		r.Client = &http.Client{
-			Transport: tr,
-			Timeout:   r.ClientTimeout.Duration,
-		}
-	}
-
-	// Create gather filters if not already created
-	if !r.filterCreated {
-		err := r.createQueueFilter()
-		if err != nil {
-			return err
-		}
-		err = r.createUpstreamFilter()
-		if err != nil {
-			return err
-		}
-		r.filterCreated = true
-	}
-
 	var wg sync.WaitGroup
-	wg.Add(len(gatherFunctions))
-	for _, f := range gatherFunctions {
+	for name, f := range gatherFunctions {
+		// Query only metrics that are supported
+		if !r.metricFilter.Match(name) {
+			continue
+		}
+		wg.Add(1)
 		go func(gf gatherFunc) {
 			defer wg.Done()
 			gf(r, acc)
@@ -364,15 +337,16 @@ func (r *RabbitMQ) Gather(acc telegraf.Accumulator) error {
 	return nil
 }
 
-func (r *RabbitMQ) requestJSON(u string, target interface{}) error {
+func (r *RabbitMQ) requestEndpoint(u string) ([]byte, error) {
 	if r.URL == "" {
 		r.URL = DefaultURL
 	}
-	u = fmt.Sprintf("%s%s", r.URL, u)
+	endpoint := r.URL + u
+	r.Log.Debugf("Requesting %q...", endpoint)
 
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	username := r.Username
@@ -387,14 +361,37 @@ func (r *RabbitMQ) requestJSON(u string, target interface{}) error {
 
 	req.SetBasicAuth(username, password)
 
-	resp, err := r.Client.Do(req)
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	r.Log.Debugf("HTTP status code: %v %v", resp.StatusCode, http.StatusText(resp.StatusCode))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("getting %q failed: %v %v", u, resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+func (r *RabbitMQ) requestJSON(u string, target interface{}) error {
+	buf, err := r.requestEndpoint(u)
 	if err != nil {
 		return err
 	}
+	if err := json.Unmarshal(buf, target); err != nil {
+		if _, ok := err.(*json.UnmarshalTypeError); ok {
+			// Try to get the error reason from the response
+			var errResponse ErrorResponse
+			if json.Unmarshal(buf, &errResponse) == nil && errResponse.Error != "" {
+				// Return the error reason in the response
+				return fmt.Errorf("error response trying to get %q: %q (reason: %q)", u, errResponse.Error, errResponse.Reason)
+			}
+		}
 
-	defer resp.Body.Close()
-
-	json.NewDecoder(resp.Body).Decode(target)
+		return fmt.Errorf("decoding answer from %q failed: %v", u, err)
+	}
 
 	return nil
 }
@@ -408,7 +405,7 @@ func gatherOverview(r *RabbitMQ, acc telegraf.Accumulator) {
 		return
 	}
 
-	if overview.QueueTotals == nil || overview.ObjectTotals == nil || overview.MessageStats == nil || overview.Listeners == nil {
+	if overview.QueueTotals == nil || overview.ObjectTotals == nil || overview.MessageStats == nil {
 		acc.AddError(fmt.Errorf("Wrong answer from rabbitmq. Probably auth issue"))
 		return
 	}
@@ -448,134 +445,119 @@ func gatherOverview(r *RabbitMQ, acc telegraf.Accumulator) {
 }
 
 func gatherNodes(r *RabbitMQ, acc telegraf.Accumulator) {
-	allNodes := make([]Node, 0)
-	// Gather information about nodes
+	allNodes := make([]*Node, 0)
+
 	err := r.requestJSON("/api/nodes", &allNodes)
 	if err != nil {
 		acc.AddError(err)
 		return
 	}
 
-	nodes := make(map[string]Node)
+	nodes := allNodes[:0]
 	for _, node := range allNodes {
 		if r.shouldGatherNode(node) {
-			nodes[node.Name] = node
+			nodes = append(nodes, node)
 		}
 	}
 
-	numberNodes := len(nodes)
-	if numberNodes == 0 {
-		return
-	}
-
-	type NodeCheck struct {
-		NodeName    string
-		HealthCheck HealthCheck
-		Memory      *Memory
-	}
-
-	nodeChecksChannel := make(chan NodeCheck, numberNodes)
-
+	var wg sync.WaitGroup
 	for _, node := range nodes {
-		go func(nodeName string, healthChecksChannel chan NodeCheck) {
-			var healthCheck HealthCheck
-			var memoryresponse MemoryResponse
+		wg.Add(1)
+		go func(node *Node) {
+			defer wg.Done()
 
-			err := r.requestJSON("/api/healthchecks/node/"+nodeName, &healthCheck)
-			nodeCheck := NodeCheck{
-				NodeName:    nodeName,
-				HealthCheck: healthCheck,
+			tags := map[string]string{"url": r.URL}
+			tags["node"] = node.Name
+
+			fields := map[string]interface{}{
+				"disk_free":                 node.DiskFree,
+				"disk_free_limit":           node.DiskFreeLimit,
+				"disk_free_alarm":           boolToInt(node.DiskFreeAlarm),
+				"fd_total":                  node.FdTotal,
+				"fd_used":                   node.FdUsed,
+				"mem_limit":                 node.MemLimit,
+				"mem_used":                  node.MemUsed,
+				"mem_alarm":                 boolToInt(node.MemAlarm),
+				"proc_total":                node.ProcTotal,
+				"proc_used":                 node.ProcUsed,
+				"run_queue":                 node.RunQueue,
+				"sockets_total":             node.SocketsTotal,
+				"sockets_used":              node.SocketsUsed,
+				"uptime":                    node.Uptime,
+				"mnesia_disk_tx_count":      node.MnesiaDiskTxCount,
+				"mnesia_disk_tx_count_rate": node.MnesiaDiskTxCountDetails.Rate,
+				"mnesia_ram_tx_count":       node.MnesiaRAMTxCount,
+				"mnesia_ram_tx_count_rate":  node.MnesiaRAMTxCountDetails.Rate,
+				"gc_num":                    node.GcNum,
+				"gc_num_rate":               node.GcNumDetails.Rate,
+				"gc_bytes_reclaimed":        node.GcBytesReclaimed,
+				"gc_bytes_reclaimed_rate":   node.GcBytesReclaimedDetails.Rate,
+				"io_read_avg_time":          node.IoReadAvgTime,
+				"io_read_avg_time_rate":     node.IoReadAvgTimeDetails.Rate,
+				"io_read_bytes":             node.IoReadBytes,
+				"io_read_bytes_rate":        node.IoReadBytesDetails.Rate,
+				"io_write_avg_time":         node.IoWriteAvgTime,
+				"io_write_avg_time_rate":    node.IoWriteAvgTimeDetails.Rate,
+				"io_write_bytes":            node.IoWriteBytes,
+				"io_write_bytes_rate":       node.IoWriteBytesDetails.Rate,
+				"running":                   boolToInt(node.Running),
 			}
+
+			var memory MemoryResponse
+			err = r.requestJSON("/api/nodes/"+node.Name+"/memory", &memory)
 			if err != nil {
 				acc.AddError(err)
 				return
 			}
 
-			err = r.requestJSON("/api/nodes/"+nodeName+"/memory", &memoryresponse)
-			nodeCheck.Memory = memoryresponse.Memory
-			if err != nil {
-				acc.AddError(err)
-				return
+			if memory.Memory != nil {
+				fields["mem_connection_readers"] = memory.Memory.ConnectionReaders
+				fields["mem_connection_writers"] = memory.Memory.ConnectionWriters
+				fields["mem_connection_channels"] = memory.Memory.ConnectionChannels
+				fields["mem_connection_other"] = memory.Memory.ConnectionOther
+				fields["mem_queue_procs"] = memory.Memory.QueueProcs
+				fields["mem_queue_slave_procs"] = memory.Memory.QueueSlaveProcs
+				fields["mem_plugins"] = memory.Memory.Plugins
+				fields["mem_other_proc"] = memory.Memory.OtherProc
+				fields["mem_metrics"] = memory.Memory.Metrics
+				fields["mem_mgmt_db"] = memory.Memory.MgmtDb
+				fields["mem_mnesia"] = memory.Memory.Mnesia
+				fields["mem_other_ets"] = memory.Memory.OtherEts
+				fields["mem_binary"] = memory.Memory.Binary
+				fields["mem_msg_index"] = memory.Memory.MsgIndex
+				fields["mem_code"] = memory.Memory.Code
+				fields["mem_atom"] = memory.Memory.Atom
+				fields["mem_other_system"] = memory.Memory.OtherSystem
+				fields["mem_allocated_unused"] = memory.Memory.AllocatedUnused
+				fields["mem_reserved_unallocated"] = memory.Memory.ReservedUnallocated
+				switch v := memory.Memory.Total.(type) {
+				case float64:
+					fields["mem_total"] = int64(v)
+				case map[string]interface{}:
+					var foundEstimator bool
+					for _, estimator := range []string{"rss", "allocated", "erlang"} {
+						if x, found := v[estimator]; found {
+							if total, ok := x.(float64); ok {
+								fields["mem_total"] = int64(total)
+								foundEstimator = true
+								break
+							}
+							acc.AddError(fmt.Errorf("unknown type %T for %q total memory", x, estimator))
+						}
+					}
+					if !foundEstimator {
+						acc.AddError(fmt.Errorf("no known memory estimation in %v", v))
+					}
+				default:
+					acc.AddError(fmt.Errorf("unknown type %T for total memory", memory.Memory.Total))
+				}
 			}
 
-			nodeChecksChannel <- nodeCheck
-		}(node.Name, nodeChecksChannel)
+			acc.AddFields("rabbitmq_node", fields, tags)
+		}(node)
 	}
 
-	now := time.Now()
-
-	for i := 0; i < len(nodes); i++ {
-		nodeCheck := <-nodeChecksChannel
-
-		var healthCheckStatus int64 = 0
-
-		if nodeCheck.HealthCheck.Status == "ok" {
-			healthCheckStatus = 1
-		}
-
-		node := nodes[nodeCheck.NodeName]
-
-		tags := map[string]string{"url": r.URL}
-		tags["node"] = node.Name
-
-		fields := map[string]interface{}{
-			"disk_free":                 node.DiskFree,
-			"disk_free_limit":           node.DiskFreeLimit,
-			"disk_free_alarm":           boolToInt(node.DiskFreeAlarm),
-			"fd_total":                  node.FdTotal,
-			"fd_used":                   node.FdUsed,
-			"mem_limit":                 node.MemLimit,
-			"mem_used":                  node.MemUsed,
-			"mem_alarm":                 boolToInt(node.MemAlarm),
-			"proc_total":                node.ProcTotal,
-			"proc_used":                 node.ProcUsed,
-			"run_queue":                 node.RunQueue,
-			"sockets_total":             node.SocketsTotal,
-			"sockets_used":              node.SocketsUsed,
-			"uptime":                    node.Uptime,
-			"mnesia_disk_tx_count":      node.MnesiaDiskTxCount,
-			"mnesia_disk_tx_count_rate": node.MnesiaDiskTxCountDetails.Rate,
-			"mnesia_ram_tx_count":       node.MnesiaRamTxCount,
-			"mnesia_ram_tx_count_rate":  node.MnesiaRamTxCountDetails.Rate,
-			"gc_num":                    node.GcNum,
-			"gc_num_rate":               node.GcNumDetails.Rate,
-			"gc_bytes_reclaimed":        node.GcBytesReclaimed,
-			"gc_bytes_reclaimed_rate":   node.GcBytesReclaimedDetails.Rate,
-			"io_read_avg_time":          node.IoReadAvgTime,
-			"io_read_avg_time_rate":     node.IoReadAvgTimeDetails.Rate,
-			"io_read_bytes":             node.IoReadBytes,
-			"io_read_bytes_rate":        node.IoReadBytesDetails.Rate,
-			"io_write_avg_time":         node.IoWriteAvgTime,
-			"io_write_avg_time_rate":    node.IoWriteAvgTimeDetails.Rate,
-			"io_write_bytes":            node.IoWriteBytes,
-			"io_write_bytes_rate":       node.IoWriteBytesDetails.Rate,
-			"running":                   boolToInt(node.Running),
-			"health_check_status":       healthCheckStatus,
-		}
-		if nodeCheck.Memory != nil {
-			fields["mem_connection_readers"] = nodeCheck.Memory.ConnectionReaders
-			fields["mem_connection_writers"] = nodeCheck.Memory.ConnectionWriters
-			fields["mem_connection_channels"] = nodeCheck.Memory.ConnectionChannels
-			fields["mem_connection_other"] = nodeCheck.Memory.ConnectionOther
-			fields["mem_queue_procs"] = nodeCheck.Memory.QueueProcs
-			fields["mem_queue_slave_procs"] = nodeCheck.Memory.QueueSlaveProcs
-			fields["mem_plugins"] = nodeCheck.Memory.Plugins
-			fields["mem_other_proc"] = nodeCheck.Memory.OtherProc
-			fields["mem_metrics"] = nodeCheck.Memory.Metrics
-			fields["mem_mgmt_db"] = nodeCheck.Memory.MgmtDb
-			fields["mem_mnesia"] = nodeCheck.Memory.Mnesia
-			fields["mem_other_ets"] = nodeCheck.Memory.OtherEts
-			fields["mem_binary"] = nodeCheck.Memory.Binary
-			fields["mem_msg_index"] = nodeCheck.Memory.MsgIndex
-			fields["mem_code"] = nodeCheck.Memory.Code
-			fields["mem_atom"] = nodeCheck.Memory.Atom
-			fields["mem_other_system"] = nodeCheck.Memory.OtherSystem
-			fields["mem_allocated_unused"] = nodeCheck.Memory.AllocatedUnused
-			fields["mem_reserved_unallocated"] = nodeCheck.Memory.ReservedUnallocated
-			fields["mem_total"] = nodeCheck.Memory.Total
-		}
-		acc.AddFields("rabbitmq_node", fields, tags, now)
-	}
+	wg.Wait()
 }
 
 func gatherQueues(r *RabbitMQ, acc telegraf.Accumulator) {
@@ -603,34 +585,42 @@ func gatherQueues(r *RabbitMQ, acc telegraf.Accumulator) {
 			"auto_delete": strconv.FormatBool(queue.AutoDelete),
 		}
 
+		fields := map[string]interface{}{
+			// common information
+			"consumers":                queue.Consumers,
+			"consumer_utilisation":     queue.ConsumerUtilisation,
+			"idle_since":               queue.IdleSince,
+			"slave_nodes":              len(queue.SlaveNodes),
+			"synchronised_slave_nodes": len(queue.SynchronisedSlaveNodes),
+			"memory":                   queue.Memory,
+			// messages information
+			"message_bytes":             queue.MessageBytes,
+			"message_bytes_ready":       queue.MessageBytesReady,
+			"message_bytes_unacked":     queue.MessageBytesUnacknowledged,
+			"message_bytes_ram":         queue.MessageRAM,
+			"message_bytes_persist":     queue.MessagePersistent,
+			"messages":                  queue.Messages,
+			"messages_ready":            queue.MessagesReady,
+			"messages_unack":            queue.MessagesUnacknowledged,
+			"messages_ack":              queue.MessageStats.Ack,
+			"messages_ack_rate":         queue.MessageStats.AckDetails.Rate,
+			"messages_deliver":          queue.MessageStats.Deliver,
+			"messages_deliver_rate":     queue.MessageStats.DeliverDetails.Rate,
+			"messages_deliver_get":      queue.MessageStats.DeliverGet,
+			"messages_deliver_get_rate": queue.MessageStats.DeliverGetDetails.Rate,
+			"messages_publish":          queue.MessageStats.Publish,
+			"messages_publish_rate":     queue.MessageStats.PublishDetails.Rate,
+			"messages_redeliver":        queue.MessageStats.Redeliver,
+			"messages_redeliver_rate":   queue.MessageStats.RedeliverDetails.Rate,
+		}
+
+		if queue.HeadMessageTimestamp != nil {
+			fields["head_message_timestamp"] = *queue.HeadMessageTimestamp
+		}
+
 		acc.AddFields(
 			"rabbitmq_queue",
-			map[string]interface{}{
-				// common information
-				"consumers":            queue.Consumers,
-				"consumer_utilisation": queue.ConsumerUtilisation,
-				"idle_since":           queue.IdleSince,
-				"memory":               queue.Memory,
-				// messages information
-				"message_bytes":             queue.MessageBytes,
-				"message_bytes_ready":       queue.MessageBytesReady,
-				"message_bytes_unacked":     queue.MessageBytesUnacknowledged,
-				"message_bytes_ram":         queue.MessageRAM,
-				"message_bytes_persist":     queue.MessagePersistent,
-				"messages":                  queue.Messages,
-				"messages_ready":            queue.MessagesReady,
-				"messages_unack":            queue.MessagesUnacknowledged,
-				"messages_ack":              queue.MessageStats.Ack,
-				"messages_ack_rate":         queue.MessageStats.AckDetails.Rate,
-				"messages_deliver":          queue.MessageStats.Deliver,
-				"messages_deliver_rate":     queue.MessageStats.DeliverDetails.Rate,
-				"messages_deliver_get":      queue.MessageStats.DeliverGet,
-				"messages_deliver_get_rate": queue.MessageStats.DeliverGetDetails.Rate,
-				"messages_publish":          queue.MessageStats.Publish,
-				"messages_publish_rate":     queue.MessageStats.PublishDetails.Rate,
-				"messages_redeliver":        queue.MessageStats.Redeliver,
-				"messages_redeliver_rate":   queue.MessageStats.RedeliverDetails.Rate,
-			},
+			fields,
 			tags,
 		)
 	}
@@ -718,7 +708,7 @@ func gatherFederationLinks(r *RabbitMQ, acc telegraf.Accumulator) {
 	}
 }
 
-func (r *RabbitMQ) shouldGatherNode(node Node) bool {
+func (r *RabbitMQ) shouldGatherNode(node *Node) bool {
 	if len(r.Nodes) == 0 {
 		return true
 	}
@@ -795,8 +785,8 @@ func (r *RabbitMQ) shouldGatherFederationLink(link FederationLink) bool {
 func init() {
 	inputs.Add("rabbitmq", func() telegraf.Input {
 		return &RabbitMQ{
-			ResponseHeaderTimeout: internal.Duration{Duration: DefaultResponseHeaderTimeout * time.Second},
-			ClientTimeout:         internal.Duration{Duration: DefaultClientTimeout * time.Second},
+			ResponseHeaderTimeout: config.Duration(DefaultResponseHeaderTimeout * time.Second),
+			ClientTimeout:         config.Duration(DefaultClientTimeout * time.Second),
 		}
 	})
 }

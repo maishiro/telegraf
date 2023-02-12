@@ -2,16 +2,26 @@
 
 This plugin writes telegraf metrics to files
 
-### Configuration
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Send telegraf metrics to file(s)
 [[outputs.file]]
   ## Files to write to, "stdout" is a specially handled file.
   files = ["stdout", "/tmp/metrics.out"]
 
   ## Use batch serialization format instead of line based delimiting.  The
   ## batch format allows for the production of non line based output formats and
-  ## may more effiently encode and write metrics.
+  ## may more efficiently encode and write metrics.
   # use_batch_format = false
 
   ## The file will be rotated after the time interval specified.  When set

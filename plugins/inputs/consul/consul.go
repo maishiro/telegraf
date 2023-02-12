@@ -1,15 +1,20 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package consul
 
 import (
+	_ "embed"
 	"net/http"
 	"strings"
 
 	"github.com/hashicorp/consul/api"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
+
+//go:embed sample.conf
+var sampleConfig string
 
 type Consul struct {
 	Address    string
@@ -17,51 +22,27 @@ type Consul struct {
 	Token      string
 	Username   string
 	Password   string
-	Datacentre string // deprecated in 1.10; use Datacenter
+	Datacentre string `toml:"datacentre" deprecated:"1.10.0;use 'datacenter' instead"`
 	Datacenter string
 	tls.ClientConfig
-	TagDelimiter string
+	TagDelimiter  string
+	MetricVersion int
+	Log           telegraf.Logger
 
 	// client used to connect to Consul agnet
 	client *api.Client
 }
 
-var sampleConfig = `
-  ## Consul server address
-  # address = "localhost"
-
-  ## URI scheme for the Consul server, one of "http", "https"
-  # scheme = "http"
-
-  ## ACL token used in every request
-  # token = ""
-
-  ## HTTP Basic Authentication username and password.
-  # username = ""
-  # password = ""
-
-  ## Data center to query the health checks from
-  # datacenter = ""
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-  ## Use TLS but skip chain & host verification
-  # insecure_skip_verify = true
-
-  ## Consul checks' tag splitting
-  # When tags are formatted like "key:value" with ":" as a delimiter then
-  # they will be splitted and reported as proper key:value in Telegraf
-  # tag_delimiter = ":"
-`
-
-func (c *Consul) Description() string {
-	return "Gather health check statuses from services registered in Consul"
+func (*Consul) SampleConfig() string {
+	return sampleConfig
 }
 
-func (c *Consul) SampleConfig() string {
-	return sampleConfig
+func (c *Consul) Init() error {
+	if c.MetricVersion != 2 {
+		c.Log.Warnf("Use of deprecated configuration: 'metric_version = 1'; please update to 'metric_version = 2'")
+	}
+
+	return nil
 }
 
 func (c *Consul) createAPIClient() (*api.Client, error) {
@@ -111,14 +92,20 @@ func (c *Consul) GatherHealthCheck(acc telegraf.Accumulator, checks []*api.Healt
 		record := make(map[string]interface{})
 		tags := make(map[string]string)
 
-		record["check_name"] = check.Name
-		record["service_id"] = check.ServiceID
-
-		record["status"] = check.Status
 		record["passing"] = 0
 		record["critical"] = 0
 		record["warning"] = 0
 		record[check.Status] = 1
+
+		if c.MetricVersion == 2 {
+			tags["check_name"] = check.Name
+			tags["service_id"] = check.ServiceID
+			tags["status"] = check.Status
+		} else {
+			record["check_name"] = check.Name
+			record["service_id"] = check.ServiceID
+			record["status"] = check.Status
+		}
 
 		tags["node"] = check.Node
 		tags["service_name"] = check.ServiceName

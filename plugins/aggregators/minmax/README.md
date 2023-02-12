@@ -3,9 +3,18 @@
 The minmax aggregator plugin aggregates min & max values of each field it sees,
 emitting the aggrate every `period` seconds.
 
-### Configuration:
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
 # Keep the aggregate min/max of each metric passing through.
 [[aggregators.minmax]]
   ## General Aggregator Arguments:
@@ -16,19 +25,19 @@ emitting the aggrate every `period` seconds.
   drop_original = false
 ```
 
-### Measurements & Fields:
+## Measurements & Fields
 
 - measurement1
-    - field1_max
-    - field1_min
+  - field1_max
+  - field1_min
 
-### Tags:
+## Tags
 
 No tags are applied by this aggregator.
 
-### Example Output:
+## Example Output
 
-```
+```shell
 $ telegraf --config telegraf.conf --quiet
 system,host=tars load1=1.72 1475583980000000000
 system,host=tars load1=1.6 1475583990000000000

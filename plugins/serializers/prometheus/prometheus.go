@@ -2,9 +2,11 @@ package prometheus
 
 import (
 	"bytes"
+	"time"
+
+	"github.com/prometheus/common/expfmt"
 
 	"github.com/influxdata/telegraf"
-	"github.com/prometheus/common/expfmt"
 )
 
 // TimestampExport controls if the output contains timestamps.
@@ -35,15 +37,18 @@ type FormatConfig struct {
 	TimestampExport TimestampExport
 	MetricSortOrder MetricSortOrder
 	StringHandling  StringHandling
+	// CompactEncoding defines whether to include
+	// HELP metadata in Prometheus payload. Setting to true
+	// helps to reduce payload size.
+	CompactEncoding bool
 }
 
 type Serializer struct {
 	config FormatConfig
 }
 
-func NewSerializer(config FormatConfig) (*Serializer, error) {
-	s := &Serializer{config: config}
-	return s, nil
+func NewSerializer(config FormatConfig) *Serializer {
+	return &Serializer{config: config}
 }
 
 func (s *Serializer) Serialize(metric telegraf.Metric) ([]byte, error) {
@@ -53,7 +58,7 @@ func (s *Serializer) Serialize(metric telegraf.Metric) ([]byte, error) {
 func (s *Serializer) SerializeBatch(metrics []telegraf.Metric) ([]byte, error) {
 	coll := NewCollection(s.config)
 	for _, metric := range metrics {
-		coll.Add(metric)
+		coll.Add(metric, time.Now())
 	}
 
 	var buf bytes.Buffer

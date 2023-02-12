@@ -15,9 +15,19 @@ Counting fields with a high number of potential values may produce significant
 amounts of new fields and memory usage, take care to only count fields with a
 limited set of values.
 
-### Configuration:
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Count the occurrence of values in fields.
 [[aggregators.valuecounter]]
   ## General Aggregator Arguments:
   ## The period on which to flush & clear the aggregator.
@@ -29,22 +39,23 @@ limited set of values.
   fields = ["status"]
 ```
 
-### Measurements & Fields:
+### Measurements & Fields
 
 - measurement1
-    - field_value1
-    - field_value2
+  - field_value1
+  - field_value2
 
-### Tags:
+### Tags
 
 No tags are applied by this aggregator.
 
-### Example Output:
+## Example Output
 
 Example for parsing a HTTP access log.
 
 telegraf.conf:
-```
+
+```toml
 [[inputs.logparser]]
   files = ["/tmp/tst.log"]
   [inputs.logparser.grok]
@@ -57,13 +68,14 @@ telegraf.conf:
 ```
 
 /tmp/tst.log
-```
+
+```text
 /some/path 200
 /some/path 401
 /some/path 200
 ```
 
-```
+```shell
 $ telegraf --config telegraf.conf --quiet
 
 access,url=/some/path,path=/tmp/tst.log,host=localhost.localdomain response="200" 1511948755991487011

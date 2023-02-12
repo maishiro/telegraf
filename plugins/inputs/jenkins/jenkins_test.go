@@ -1,3 +1,4 @@
+// Test Suite
 package jenkins
 
 import (
@@ -9,17 +10,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/testutil"
 )
 
 func TestJobRequest(t *testing.T) {
 	tests := []struct {
-		input  jobRequest
-		output string
+		input         jobRequest
+		hierarchyName string
+		URL           string
 	}{
 		{
 			jobRequest{},
+			"",
 			"",
 		},
 		{
@@ -28,12 +31,26 @@ func TestJobRequest(t *testing.T) {
 				parents: []string{"3", "2"},
 			},
 			"3/2/1",
+			"/job/3/job/2/job/1/api/json",
+		},
+		{
+			jobRequest{
+				name:    "job 3",
+				parents: []string{"job 1", "job 2"},
+			},
+			"job 1/job 2/job 3",
+			"/job/job%201/job/job%202/job/job%203/api/json",
 		},
 	}
 	for _, test := range tests {
-		output := test.input.hierarchyName()
-		if output != test.output {
-			t.Errorf("Expected %s, got %s\n", test.output, output)
+		hierarchyName := test.input.hierarchyName()
+		address := test.input.URL()
+		if hierarchyName != test.hierarchyName {
+			t.Errorf("Expected %s, got %s\n", test.hierarchyName, hierarchyName)
+		}
+
+		if test.URL != "" && address != test.URL {
+			t.Errorf("Expected %s, got %s\n", test.URL, address)
 		}
 	}
 }
@@ -58,14 +75,14 @@ func TestResultCode(t *testing.T) {
 }
 
 type mockHandler struct {
-	// responseMap is the path to repsonse interface
-	// we will ouput the serialized response in json when serving http
+	// responseMap is the path to response interface
+	// we will output the serialized response in json when serving http
 	// example '/computer/api/json': *gojenkins.
 	responseMap map[string]interface{}
 }
 
 func (h mockHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	o, ok := h.responseMap[r.URL.Path]
+	o, ok := h.responseMap[r.URL.RequestURI()]
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -80,7 +97,8 @@ func (h mockHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	w.Write(b)
+
+	w.Write(b) //nolint:errcheck,revive // ignore the returned error as the tests will fail anyway
 }
 
 func TestGatherNodeData(t *testing.T) {
@@ -105,6 +123,19 @@ func TestGatherNodeData(t *testing.T) {
 				},
 			},
 			wantErr: true,
+			output: &testutil.Accumulator{
+				Metrics: []*testutil.Metric{
+					{
+						Tags: map[string]string{
+							"source": "127.0.0.1",
+						},
+						Fields: map[string]interface{}{
+							"busy_executors":  0,
+							"total_executors": 0,
+						},
+					},
+				},
+			},
 		},
 		{
 			name: "empty monitor data",
@@ -124,14 +155,58 @@ func TestGatherNodeData(t *testing.T) {
 			},
 		},
 		{
-			name: "filtered nodes",
+			name: "filtered nodes (excluded)",
 			input: mockHandler{
 				responseMap: map[string]interface{}{
 					"/api/json": struct{}{},
 					"/computer/api/json": nodeResponse{
+						BusyExecutors:  4,
+						TotalExecutors: 8,
 						Computers: []node{
 							{DisplayName: "ignore-1"},
 							{DisplayName: "ignore-2"},
+						},
+					},
+				},
+			},
+			output: &testutil.Accumulator{
+				Metrics: []*testutil.Metric{
+					{
+						Tags: map[string]string{
+							"source": "127.0.0.1",
+						},
+						Fields: map[string]interface{}{
+							"busy_executors":  4,
+							"total_executors": 8,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "filtered nodes (included)",
+			input: mockHandler{
+				responseMap: map[string]interface{}{
+					"/api/json": struct{}{},
+					"/computer/api/json": nodeResponse{
+						BusyExecutors:  4,
+						TotalExecutors: 8,
+						Computers: []node{
+							{DisplayName: "filtered-1"},
+							{DisplayName: "filtered-1"},
+						},
+					},
+				},
+			},
+			output: &testutil.Accumulator{
+				Metrics: []*testutil.Metric{
+					{
+						Tags: map[string]string{
+							"source": "127.0.0.1",
+						},
+						Fields: map[string]interface{}{
+							"busy_executors":  4,
+							"total_executors": 8,
 						},
 					},
 				},
@@ -143,6 +218,8 @@ func TestGatherNodeData(t *testing.T) {
 				responseMap: map[string]interface{}{
 					"/api/json": struct{}{},
 					"/computer/api/json": nodeResponse{
+						BusyExecutors:  4,
+						TotalExecutors: 8,
 						Computers: []node{
 							{
 								DisplayName: "master",
@@ -176,6 +253,15 @@ func TestGatherNodeData(t *testing.T) {
 				Metrics: []*testutil.Metric{
 					{
 						Tags: map[string]string{
+							"source": "127.0.0.1",
+						},
+						Fields: map[string]interface{}{
+							"busy_executors":  4,
+							"total_executors": 8,
+						},
+					},
+					{
+						Tags: map[string]string{
 							"node_name": "master",
 							"arch":      "linux",
 							"status":    "online",
@@ -202,6 +288,8 @@ func TestGatherNodeData(t *testing.T) {
 				responseMap: map[string]interface{}{
 					"/api/json": struct{}{},
 					"/computer/api/json": nodeResponse{
+						BusyExecutors:  4,
+						TotalExecutors: 8,
 						Computers: []node{
 							{
 								DisplayName:  "slave",
@@ -215,6 +303,15 @@ func TestGatherNodeData(t *testing.T) {
 			},
 			output: &testutil.Accumulator{
 				Metrics: []*testutil.Metric{
+					{
+						Tags: map[string]string{
+							"source": "127.0.0.1",
+						},
+						Fields: map[string]interface{}{
+							"busy_executors":  4,
+							"total_executors": 8,
+						},
+					},
 					{
 						Tags: map[string]string{
 							"node_name": "slave",
@@ -235,8 +332,9 @@ func TestGatherNodeData(t *testing.T) {
 			j := &Jenkins{
 				Log:             testutil.Logger{},
 				URL:             ts.URL,
-				ResponseTimeout: internal.Duration{Duration: time.Microsecond},
+				ResponseTimeout: config.Duration(time.Microsecond),
 				NodeExclude:     []string{"ignore-1", "ignore-2"},
+				NodeInclude:     []string{"master", "slave"},
 			}
 			te := j.initialize(&http.Client{Transport: &http.Transport{}})
 			acc := new(testutil.Accumulator)
@@ -251,16 +349,19 @@ func TestGatherNodeData(t *testing.T) {
 				t.Fatalf("%s: expected err, got nil", test.name)
 			}
 			if test.output == nil && len(acc.Metrics) > 0 {
-				t.Fatalf("%s: collected extra data", test.name)
+				t.Fatalf("%s: collected extra data %s", test.name, acc.Metrics)
 			} else if test.output != nil && len(test.output.Metrics) > 0 {
-				for k, m := range test.output.Metrics[0].Tags {
-					if acc.Metrics[0].Tags[k] != m {
-						t.Fatalf("%s: tag %s metrics unmatch Expected %s, got %s\n", test.name, k, m, acc.Metrics[0].Tags[k])
+				for i := 0; i < len(test.output.Metrics); i++ {
+					for k, m := range test.output.Metrics[i].Tags {
+						if acc.Metrics[i].Tags[k] != m {
+							t.Fatalf("%s: tag %s metrics unmatch Expected %s, got %s\n", test.name, k, m, acc.Metrics[0].Tags[k])
+						}
 					}
-				}
-				for k, m := range test.output.Metrics[0].Fields {
-					if acc.Metrics[0].Fields[k] != m {
-						t.Fatalf("%s: field %s metrics unmatch Expected %v(%T), got %v(%T)\n", test.name, k, m, m, acc.Metrics[0].Fields[k], acc.Metrics[0].Fields[k])
+					for k, m := range test.output.Metrics[i].Fields {
+						if acc.Metrics[i].Fields[k] != m {
+							t.Fatalf("%s: field %s metrics unmatch Expected %v(%T), got %v(%T)\n",
+								test.name, k, m, m, acc.Metrics[0].Fields[k], acc.Metrics[0].Fields[k])
+						}
 					}
 				}
 			}
@@ -289,7 +390,7 @@ func TestInitialize(t *testing.T) {
 			input: &Jenkins{
 				Log:             testutil.Logger{},
 				URL:             "http://a bad url",
-				ResponseTimeout: internal.Duration{Duration: time.Microsecond},
+				ResponseTimeout: config.Duration(time.Microsecond),
 			},
 			wantErr: true,
 		},
@@ -298,7 +399,8 @@ func TestInitialize(t *testing.T) {
 			input: &Jenkins{
 				Log:             testutil.Logger{},
 				URL:             ts.URL,
-				ResponseTimeout: internal.Duration{Duration: time.Microsecond},
+				ResponseTimeout: config.Duration(time.Microsecond),
+				JobInclude:      []string{"jobA", "jobB"},
 				JobExclude:      []string{"job1", "job2"},
 				NodeExclude:     []string{"node1", "node2"},
 			},
@@ -308,7 +410,7 @@ func TestInitialize(t *testing.T) {
 			input: &Jenkins{
 				Log:             testutil.Logger{},
 				URL:             ts.URL,
-				ResponseTimeout: internal.Duration{Duration: time.Microsecond},
+				ResponseTimeout: config.Duration(time.Microsecond),
 			},
 			output: &Jenkins{
 				Log:               testutil.Logger{},
@@ -327,7 +429,7 @@ func TestInitialize(t *testing.T) {
 			}
 			if test.output != nil {
 				if test.input.client == nil {
-					t.Fatalf("%s: failed %s, jenkins instance shouldn't be nil", test.name, te.Error())
+					t.Fatalf("%s: failed %v, jenkins instance shouldn't be nil", test.name, te)
 				}
 				if test.input.MaxConnections != test.output.MaxConnections {
 					t.Fatalf("%s: different MaxConnections Expected %d, got %d\n", test.name, test.output.MaxConnections, test.input.MaxConnections)
@@ -461,12 +563,14 @@ func TestGatherJobs(t *testing.T) {
 						Building:  false,
 						Result:    "SUCCESS",
 						Duration:  25558,
+						Number:    3,
 						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
 					},
 					"/job/job2/1/api/json": &buildResponse{
 						Building:  false,
 						Result:    "FAILURE",
 						Duration:  1558,
+						Number:    1,
 						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
 					},
 				},
@@ -480,6 +584,7 @@ func TestGatherJobs(t *testing.T) {
 						},
 						Fields: map[string]interface{}{
 							"duration":    int64(25558),
+							"number":      int64(3),
 							"result_code": 0,
 						},
 					},
@@ -490,7 +595,100 @@ func TestGatherJobs(t *testing.T) {
 						},
 						Fields: map[string]interface{}{
 							"duration":    int64(1558),
+							"number":      int64(1),
 							"result_code": 1,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "gather metrics for jobs with space",
+			input: mockHandler{
+				responseMap: map[string]interface{}{
+					"/api/json": &jobResponse{
+						Jobs: []innerJob{
+							{Name: "job 1"},
+						},
+					},
+					"/job/job%201/api/json": &jobResponse{
+						LastBuild: jobBuild{
+							Number: 3,
+						},
+					},
+					"/job/job%201/3/api/json": &buildResponse{
+						Building:  false,
+						Result:    "SUCCESS",
+						Duration:  25558,
+						Number:    3,
+						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
+					},
+				},
+			},
+			output: &testutil.Accumulator{
+				Metrics: []*testutil.Metric{
+					{
+						Tags: map[string]string{
+							"name":   "job 1",
+							"result": "SUCCESS",
+						},
+						Fields: map[string]interface{}{
+							"duration":    int64(25558),
+							"number":      int64(3),
+							"result_code": 0,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "gather metrics for nested jobs with space exercising append slice behaviour",
+			input: mockHandler{
+				responseMap: map[string]interface{}{
+					"/api/json": &jobResponse{
+						Jobs: []innerJob{
+							{Name: "l1"},
+						},
+					},
+					"/job/l1/api/json": &jobResponse{
+						Jobs: []innerJob{
+							{Name: "l2"},
+						},
+					},
+					"/job/l1/job/l2/api/json": &jobResponse{
+						Jobs: []innerJob{
+							{Name: "job 1"},
+						},
+					},
+					"/job/l1/job/l2/job/job%201/api/json": &jobResponse{
+						Jobs: []innerJob{
+							{Name: "job 2"},
+						},
+					},
+					"/job/l1/job/l2/job/job%201/job/job%202/api/json": &jobResponse{
+						LastBuild: jobBuild{
+							Number: 3,
+						},
+					},
+					"/job/l1/job/l2/job/job%201/job/job%202/3/api/json": &buildResponse{
+						Building:  false,
+						Result:    "SUCCESS",
+						Duration:  25558,
+						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
+					},
+				},
+			},
+			output: &testutil.Accumulator{
+				Metrics: []*testutil.Metric{
+					{
+						Tags: map[string]string{
+							"name":    "job 2",
+							"parents": "l1/l2/job 1",
+							"result":  "SUCCESS",
+						},
+						Fields: map[string]interface{}{
+							"duration":    int64(25558),
+							"result_code": 0,
 						},
 					},
 				},
@@ -529,6 +727,8 @@ func TestGatherJobs(t *testing.T) {
 							{Name: "PR-100"},
 							{Name: "PR-101"},
 							{Name: "PR-ignore2"},
+							{Name: "PR 1"},
+							{Name: "PR ignore"},
 						},
 					},
 					"/job/apps/job/k8s-cloud/job/PR-100/api/json": &jobResponse{
@@ -541,22 +741,37 @@ func TestGatherJobs(t *testing.T) {
 							Number: 4,
 						},
 					},
+					"/job/apps/job/k8s-cloud/job/PR%201/api/json": &jobResponse{
+						LastBuild: jobBuild{
+							Number: 1,
+						},
+					},
 					"/job/apps/job/chronograf/1/api/json": &buildResponse{
 						Building:  false,
 						Result:    "FAILURE",
 						Duration:  1558,
+						Number:    1,
 						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
 					},
 					"/job/apps/job/k8s-cloud/job/PR-101/4/api/json": &buildResponse{
 						Building:  false,
 						Result:    "SUCCESS",
 						Duration:  76558,
+						Number:    4,
 						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
 					},
 					"/job/apps/job/k8s-cloud/job/PR-100/1/api/json": &buildResponse{
 						Building:  false,
 						Result:    "SUCCESS",
 						Duration:  91558,
+						Number:    1,
+						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
+					},
+					"/job/apps/job/k8s-cloud/job/PR%201/1/api/json": &buildResponse{
+						Building:  false,
+						Result:    "SUCCESS",
+						Duration:  87832,
+						Number:    1,
 						Timestamp: (time.Now().Unix() - int64(time.Minute.Seconds())) * 1000,
 					},
 				},
@@ -565,12 +780,25 @@ func TestGatherJobs(t *testing.T) {
 				Metrics: []*testutil.Metric{
 					{
 						Tags: map[string]string{
+							"name":    "PR 1",
+							"parents": "apps/k8s-cloud",
+							"result":  "SUCCESS",
+						},
+						Fields: map[string]interface{}{
+							"duration":    int64(87832),
+							"number":      int64(1),
+							"result_code": 0,
+						},
+					},
+					{
+						Tags: map[string]string{
 							"name":    "PR-100",
 							"parents": "apps/k8s-cloud",
 							"result":  "SUCCESS",
 						},
 						Fields: map[string]interface{}{
 							"duration":    int64(91558),
+							"number":      int64(1),
 							"result_code": 0,
 						},
 					},
@@ -582,6 +810,7 @@ func TestGatherJobs(t *testing.T) {
 						},
 						Fields: map[string]interface{}{
 							"duration":    int64(76558),
+							"number":      int64(4),
 							"result_code": 0,
 						},
 					},
@@ -593,6 +822,7 @@ func TestGatherJobs(t *testing.T) {
 						},
 						Fields: map[string]interface{}{
 							"duration":    int64(1558),
+							"number":      int64(1),
 							"result_code": 1,
 						},
 					},
@@ -607,12 +837,16 @@ func TestGatherJobs(t *testing.T) {
 			j := &Jenkins{
 				Log:             testutil.Logger{},
 				URL:             ts.URL,
-				MaxBuildAge:     internal.Duration{Duration: time.Hour},
-				ResponseTimeout: internal.Duration{Duration: time.Microsecond},
+				MaxBuildAge:     config.Duration(time.Hour),
+				ResponseTimeout: config.Duration(time.Microsecond),
+				JobInclude: []string{
+					"*",
+				},
 				JobExclude: []string{
 					"ignore-1",
 					"apps/ignore-all/*",
 					"apps/k8s-cloud/PR-ignore2",
+					"apps/k8s-cloud/PR ignore",
 				},
 			}
 			te := j.initialize(&http.Client{Transport: &http.Transport{}})
@@ -640,11 +874,11 @@ func TestGatherJobs(t *testing.T) {
 					}
 					for k, m := range test.output.Metrics[i].Fields {
 						if acc.Metrics[i].Fields[k] != m {
-							t.Fatalf("%s: field %s metrics unmatch Expected %v(%T), got %v(%T)\n", test.name, k, m, m, acc.Metrics[i].Fields[k], acc.Metrics[0].Fields[k])
+							t.Fatalf("%s: field %s metrics unmatch Expected %v(%T), got %v(%T)\n",
+								test.name, k, m, m, acc.Metrics[i].Fields[k], acc.Metrics[0].Fields[k])
 						}
 					}
 				}
-
 			}
 		})
 	}

@@ -1,13 +1,20 @@
-# RethinkDB Input
+# RethinkDB Input Plugin
 
 Collect metrics from [RethinkDB](https://www.rethinkdb.com/).
 
-### Configuration
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-This section contains the default TOML to configure the plugin.  You can
-generate it using `telegraf --usage rethinkdb`.
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
-```toml
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Read metrics from one or many RethinkDB servers
 [[inputs.rethinkdb]]
   ## An array of URI to gather stats about. Specify an ip or hostname
   ## with optional port add password. ie,
@@ -25,7 +32,7 @@ generate it using `telegraf --usage rethinkdb`.
   # servers = ["rethinkdb://username:auth_key@127.0.0.1:28015"]
 ```
 
-### Metrics
+## Metrics
 
 - rethinkdb
   - tags:
@@ -44,7 +51,7 @@ generate it using `telegraf --usage rethinkdb`.
     - disk_usage_metadata_bytes (integer, bytes)
     - disk_usage_preallocated_bytes (integer, bytes)
 
-+ rethinkdb_engine
+- rethinkdb_engine
   - tags:
     - type
     - ns
@@ -59,3 +66,5 @@ generate it using `telegraf --usage rethinkdb`.
     - total_reads (integer, reads)
     - written_docs_per_sec (integer, writes)
     - total_writes (integer, writes)
+
+## Example Output

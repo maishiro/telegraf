@@ -1,51 +1,42 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package file
 
 import (
+	_ "embed"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"os"
 	"path/filepath"
+
+	"github.com/dimchansky/utfbom"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal/globpath"
+	"github.com/influxdata/telegraf/plugins/common/encoding"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	"github.com/influxdata/telegraf/plugins/parsers"
 )
 
-type File struct {
-	Files   []string `toml:"files"`
-	FileTag string   `toml:"file_tag"`
-	parser  parsers.Parser
+//go:embed sample.conf
+var sampleConfig string
 
-	filenames []string
+type File struct {
+	Files             []string `toml:"files"`
+	FileTag           string   `toml:"file_tag"`
+	CharacterEncoding string   `toml:"character_encoding"`
+
+	parserFunc telegraf.ParserFunc
+	filenames  []string
+	decoder    *encoding.Decoder
 }
 
-const sampleConfig = `
-  ## Files to parse each interval.
-  ## These accept standard unix glob matching rules, but with the addition of
-  ## ** as a "super asterisk". ie:
-  ##   /var/log/**.log     -> recursively find all .log files in /var/log
-  ##   /var/log/*/*.log    -> find all .log files with a parent dir in /var/log
-  ##   /var/log/apache.log -> only read the apache log file
-  files = ["/var/log/apache/access.log"]
-
-  ## The dataformat to be read from files
-  ## Each data format has its own unique set of configuration options, read
-  ## more about them here:
-  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_INPUT.md
-  data_format = "influx"
-
-  ## Name a tag containing the name of the file the data was parsed from.  Leave empty
-  ## to disable.
-  # file_tag = ""
-`
-
-// SampleConfig returns the default configuration of the Input
-func (f *File) SampleConfig() string {
+func (*File) SampleConfig() string {
 	return sampleConfig
 }
 
-func (f *File) Description() string {
-	return "Reload and gather from file[s] on telegraf's interval."
+func (f *File) Init() error {
+	var err error
+	f.decoder, err = encoding.NewDecoder(f.CharacterEncoding)
+	return err
 }
 
 func (f *File) Gather(acc telegraf.Accumulator) error {
@@ -63,14 +54,14 @@ func (f *File) Gather(acc telegraf.Accumulator) error {
 			if f.FileTag != "" {
 				m.AddTag(f.FileTag, filepath.Base(k))
 			}
-			acc.AddFields(m.Name(), m.Fields(), m.Tags(), m.Time())
+			acc.AddMetric(m)
 		}
 	}
 	return nil
 }
 
-func (f *File) SetParser(p parsers.Parser) {
-	f.parser = p
+func (f *File) SetParserFunc(fn telegraf.ParserFunc) {
+	f.parserFunc = fn
 }
 
 func (f *File) refreshFilePaths() error {
@@ -78,11 +69,11 @@ func (f *File) refreshFilePaths() error {
 	for _, file := range f.Files {
 		g, err := globpath.Compile(file)
 		if err != nil {
-			return fmt.Errorf("could not compile glob %v: %v", file, err)
+			return fmt.Errorf("could not compile glob %q: %w", file, err)
 		}
 		files := g.Match()
 		if len(files) <= 0 {
-			return fmt.Errorf("could not find file: %v", file)
+			return fmt.Errorf("could not find file(s): %v", file)
 		}
 		allFiles = append(allFiles, files...)
 	}
@@ -92,12 +83,26 @@ func (f *File) refreshFilePaths() error {
 }
 
 func (f *File) readMetric(filename string) ([]telegraf.Metric, error) {
-	fileContents, err := ioutil.ReadFile(filename)
+	file, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("E! Error file: %v could not be read, %s", filename, err)
+		return nil, err
 	}
-	return f.parser.Parse(fileContents)
+	defer file.Close()
 
+	r, _ := utfbom.Skip(f.decoder.Reader(file))
+	fileContents, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("could not read %q: %w", filename, err)
+	}
+	parser, err := f.parserFunc()
+	if err != nil {
+		return nil, fmt.Errorf("could not instantiate parser: %w", err)
+	}
+	metrics, err := parser.Parse(fileContents)
+	if err != nil {
+		return metrics, fmt.Errorf("could not parse %q: %w", filename, err)
+	}
+	return metrics, err
 }
 
 func init() {

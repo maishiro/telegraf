@@ -1,86 +1,246 @@
 // Package x509_cert reports metrics from an SSL certificate.
+//
+//go:generate ../../../tools/readme_config_includer/generator
 package x509_cert
 
 import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"encoding/pem"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
+	"net/smtp"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/pion/dtls/v2"
+
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
-	_tls "github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/internal/globpath"
+	"github.com/influxdata/telegraf/plugins/common/proxy"
+	commontls "github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
-const sampleConfig = `
-  ## List certificate sources
-  sources = ["/etc/ssl/certs/ssl-cert-snakeoil.pem", "tcp://example.org:443"]
-
-  ## Timeout for SSL connection
-  # timeout = "5s"
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-`
-const description = "Reads metrics from a SSL certificate"
+//go:embed sample.conf
+var sampleConfig string
 
 // X509Cert holds the configuration of the plugin.
 type X509Cert struct {
-	Sources []string          `toml:"sources"`
-	Timeout internal.Duration `toml:"timeout"`
-	tlsCfg  *tls.Config
-	_tls.ClientConfig
+	Sources          []string        `toml:"sources"`
+	Timeout          config.Duration `toml:"timeout"`
+	ServerName       string          `toml:"server_name"`
+	ExcludeRootCerts bool            `toml:"exclude_root_certs"`
+	Log              telegraf.Logger `toml:"-"`
+	commontls.ClientConfig
+	proxy.TCPProxy
+
+	tlsCfg    *tls.Config
+	locations []*url.URL
+	globpaths []*globpath.GlobPath
 }
 
-// Description returns description of the plugin.
-func (c *X509Cert) Description() string {
-	return description
-}
-
-// SampleConfig returns configuration sample for the plugin.
-func (c *X509Cert) SampleConfig() string {
+func (*X509Cert) SampleConfig() string {
 	return sampleConfig
 }
 
-func (c *X509Cert) locationToURL(location string) (*url.URL, error) {
-	if strings.HasPrefix(location, "/") {
-		location = "file://" + location
+func (c *X509Cert) Init() error {
+	// Check if we do have at least one source
+	if len(c.Sources) == 0 {
+		return errors.New("no source configured")
 	}
 
-	u, err := url.Parse(location)
+	// Check the server name and transfer it if necessary
+	if c.ClientConfig.ServerName != "" && c.ServerName != "" {
+		return fmt.Errorf("both server_name (%q) and tls_server_name (%q) are set, but they are mutually exclusive", c.ServerName, c.ClientConfig.ServerName)
+	} else if c.ServerName != "" {
+		// Store the user-provided server-name in the TLS configuration
+		c.ClientConfig.ServerName = c.ServerName
+	}
+
+	// Normalize the sources, handle files and file-globbing
+	if err := c.sourcesToURLs(); err != nil {
+		return err
+	}
+
+	// Create the TLS configuration
+	tlsCfg, err := c.ClientConfig.TLSConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse cert location - %s", err.Error())
+		return err
+	}
+	if tlsCfg == nil {
+		tlsCfg = &tls.Config{}
+	}
+	c.tlsCfg = tlsCfg
+
+	return nil
+}
+
+// Gather adds metrics into the accumulator.
+func (c *X509Cert) Gather(acc telegraf.Accumulator) error {
+	now := time.Now()
+	collectedUrls, err := c.collectCertURLs()
+	if err != nil {
+		acc.AddError(fmt.Errorf("getting some certificates failed: %w", err))
 	}
 
-	return u, nil
+	for _, location := range append(c.locations, collectedUrls...) {
+		certs, err := c.getCert(location, time.Duration(c.Timeout))
+		if err != nil {
+			acc.AddError(fmt.Errorf("cannot get SSL cert '%s': %s", location, err.Error()))
+		}
+
+		dnsName := c.serverName(location)
+		for i, cert := range certs {
+			fields := getFields(cert, now)
+			tags := getTags(cert, location.String())
+
+			// The first certificate is the leaf/end-entity certificate which
+			// needs DNS name validation against the URL hostname.
+			opts := x509.VerifyOptions{
+				Intermediates: x509.NewCertPool(),
+				KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+				Roots:         c.tlsCfg.RootCAs,
+				DNSName:       dnsName,
+			}
+			// Reset DNS name to only use it for the leaf node
+			dnsName = ""
+
+			// Add all returned certs to the pool if intermediates except for
+			// the leaf node and ourself
+			for j, c := range certs[1:] {
+				if i+1 != j {
+					opts.Intermediates.AddCert(c)
+				}
+			}
+
+			if _, err := cert.Verify(opts); err == nil {
+				tags["verification"] = "valid"
+				fields["verification_code"] = 0
+			} else {
+				c.Log.Debugf("Invalid certificate at index %2d!", i)
+				c.Log.Debugf("  cert DNS names:    %v", cert.DNSNames)
+				c.Log.Debugf("  cert IP addresses: %v", cert.IPAddresses)
+				c.Log.Debugf("  cert subject:      %v", cert.Subject)
+				c.Log.Debugf("  cert issuer:       %v", cert.Issuer)
+				c.Log.Debugf("  opts.DNSName:      %v", opts.DNSName)
+				c.Log.Debugf("  verify options:    %v", opts)
+				c.Log.Debugf("  verify error:      %v", err)
+				c.Log.Debugf("  location:          %v", location)
+				c.Log.Debugf("  tlsCfg.ServerName: %v", c.tlsCfg.ServerName)
+				c.Log.Debugf("  ServerName:        %v", c.ServerName)
+				tags["verification"] = "invalid"
+				fields["verification_code"] = 1
+				fields["verification_error"] = err.Error()
+			}
+
+			acc.AddFields("x509_cert", fields, tags)
+			if c.ExcludeRootCerts {
+				break
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *X509Cert) sourcesToURLs() error {
+	for _, source := range c.Sources {
+		if strings.HasPrefix(source, "file://") ||
+			strings.HasPrefix(source, "/") {
+			source = filepath.ToSlash(strings.TrimPrefix(source, "file://"))
+			g, err := globpath.Compile(source)
+			if err != nil {
+				return fmt.Errorf("could not compile glob %v: %v", source, err)
+			}
+			c.globpaths = append(c.globpaths, g)
+		} else {
+			if strings.Index(source, ":\\") == 1 {
+				source = "file://" + filepath.ToSlash(source)
+			}
+			u, err := url.Parse(source)
+			if err != nil {
+				return fmt.Errorf("failed to parse cert location - %s", err.Error())
+			}
+			c.locations = append(c.locations, u)
+		}
+	}
+
+	return nil
+}
+
+func (c *X509Cert) serverName(u *url.URL) string {
+	if c.tlsCfg.ServerName != "" {
+		return c.tlsCfg.ServerName
+	}
+	return u.Hostname()
 }
 
 func (c *X509Cert) getCert(u *url.URL, timeout time.Duration) ([]*x509.Certificate, error) {
+	protocol := u.Scheme
 	switch u.Scheme {
-	case "https":
-		u.Scheme = "tcp"
-		fallthrough
 	case "udp", "udp4", "udp6":
-		fallthrough
-	case "tcp", "tcp4", "tcp6":
 		ipConn, err := net.DialTimeout(u.Scheme, u.Host, timeout)
 		if err != nil {
 			return nil, err
 		}
 		defer ipConn.Close()
 
-		c.tlsCfg.ServerName = u.Hostname()
-		c.tlsCfg.InsecureSkipVerify = true
-		conn := tls.Client(ipConn, c.tlsCfg)
+		dtlsCfg := &dtls.Config{
+			InsecureSkipVerify: true,
+			Certificates:       c.tlsCfg.Certificates,
+			RootCAs:            c.tlsCfg.RootCAs,
+			ServerName:         c.serverName(u),
+		}
+		conn, err := dtls.Client(ipConn, dtlsCfg)
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+
+		rawCerts := conn.ConnectionState().PeerCertificates
+		var certs []*x509.Certificate
+		for _, rawCert := range rawCerts {
+			parsed, err := x509.ParseCertificate(rawCert)
+			if err != nil {
+				return nil, err
+			}
+
+			if parsed != nil {
+				certs = append(certs, parsed)
+			}
+		}
+
+		return certs, nil
+	case "https":
+		protocol = "tcp"
+		if u.Port() == "" {
+			u.Host += ":443"
+		}
+		fallthrough
+	case "tcp", "tcp4", "tcp6":
+		dialer, err := c.Proxy()
+		if err != nil {
+			return nil, err
+		}
+		ipConn, err := dialer.DialTimeout(protocol, u.Host, timeout)
+		if err != nil {
+			return nil, err
+		}
+		defer ipConn.Close()
+
+		downloadTLSCfg := c.tlsCfg.Clone()
+		downloadTLSCfg.ServerName = c.serverName(u)
+		downloadTLSCfg.InsecureSkipVerify = true
+
+		conn := tls.Client(ipConn, downloadTLSCfg)
 		defer conn.Close()
 
 		hsErr := conn.Handshake()
@@ -92,7 +252,7 @@ func (c *X509Cert) getCert(u *url.URL, timeout time.Duration) ([]*x509.Certifica
 
 		return certs, nil
 	case "file":
-		content, err := ioutil.ReadFile(u.Path)
+		content, err := os.ReadFile(u.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -103,19 +263,65 @@ func (c *X509Cert) getCert(u *url.URL, timeout time.Duration) ([]*x509.Certifica
 				return nil, fmt.Errorf("failed to parse certificate PEM")
 			}
 
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				return nil, err
+			if block.Type == "CERTIFICATE" {
+				cert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					return nil, err
+				}
+				certs = append(certs, cert)
 			}
-			certs = append(certs, cert)
-			if rest == nil || len(rest) == 0 {
+			if len(rest) == 0 {
 				break
 			}
 			content = rest
 		}
 		return certs, nil
+	case "smtp":
+		ipConn, err := net.DialTimeout("tcp", u.Host, timeout)
+		if err != nil {
+			return nil, err
+		}
+		defer ipConn.Close()
+
+		downloadTLSCfg := c.tlsCfg.Clone()
+		downloadTLSCfg.ServerName = c.serverName(u)
+		downloadTLSCfg.InsecureSkipVerify = true
+
+		smtpConn, err := smtp.NewClient(ipConn, u.Host)
+		if err != nil {
+			return nil, err
+		}
+
+		err = smtpConn.Hello(downloadTLSCfg.ServerName)
+		if err != nil {
+			return nil, err
+		}
+
+		id, err := smtpConn.Text.Cmd("STARTTLS")
+		if err != nil {
+			return nil, err
+		}
+
+		smtpConn.Text.StartResponse(id)
+		defer smtpConn.Text.EndResponse(id)
+		_, _, err = smtpConn.Text.ReadResponse(220)
+		if err != nil {
+			return nil, fmt.Errorf("did not get 220 after STARTTLS: %s", err.Error())
+		}
+
+		tlsConn := tls.Client(ipConn, downloadTLSCfg)
+		defer tlsConn.Close()
+
+		hsErr := tlsConn.Handshake()
+		if hsErr != nil {
+			return nil, hsErr
+		}
+
+		certs := tlsConn.ConnectionState().PeerCertificates
+
+		return certs, nil
 	default:
-		return nil, fmt.Errorf("unsuported scheme '%s' in location %s", u.Scheme, u.String())
+		return nil, fmt.Errorf("unsupported scheme '%s' in location %s", u.Scheme, u.String())
 	}
 }
 
@@ -175,79 +381,32 @@ func getTags(cert *x509.Certificate, location string) map[string]string {
 	return tags
 }
 
-// Gather adds metrics into the accumulator.
-func (c *X509Cert) Gather(acc telegraf.Accumulator) error {
-	now := time.Now()
+func (c *X509Cert) collectCertURLs() ([]*url.URL, error) {
+	var urls []*url.URL
 
-	for _, location := range c.Sources {
-		u, err := c.locationToURL(location)
-		if err != nil {
-			acc.AddError(err)
-			return nil
+	for _, path := range c.globpaths {
+		files := path.Match()
+		if len(files) <= 0 {
+			c.Log.Errorf("could not find file: %v", path)
+			continue
 		}
-
-		certs, err := c.getCert(u, c.Timeout.Duration*time.Second)
-		if err != nil {
-			acc.AddError(fmt.Errorf("cannot get SSL cert '%s': %s", location, err.Error()))
-		}
-
-		for i, cert := range certs {
-			fields := getFields(cert, now)
-			tags := getTags(cert, location)
-
-			// The first certificate is the leaf/end-entity certificate which needs DNS
-			// name validation against the URL hostname.
-			opts := x509.VerifyOptions{
-				Intermediates: x509.NewCertPool(),
+		for _, file := range files {
+			file = "file://" + file
+			u, err := url.Parse(file)
+			if err != nil {
+				return urls, fmt.Errorf("failed to parse cert location - %s", err.Error())
 			}
-			if i == 0 {
-				opts.DNSName = u.Hostname()
-				for j, cert := range certs {
-					if j != 0 {
-						opts.Intermediates.AddCert(cert)
-					}
-				}
-			}
-			if c.tlsCfg.RootCAs != nil {
-				opts.Roots = c.tlsCfg.RootCAs
-			}
-
-			_, err = cert.Verify(opts)
-			if err == nil {
-				tags["verification"] = "valid"
-				fields["verification_code"] = 0
-			} else {
-				tags["verification"] = "invalid"
-				fields["verification_code"] = 1
-				fields["verification_error"] = err.Error()
-			}
-
-			acc.AddFields("x509_cert", fields, tags)
+			urls = append(urls, u)
 		}
 	}
 
-	return nil
-}
-
-func (c *X509Cert) Init() error {
-	tlsCfg, err := c.ClientConfig.TLSConfig()
-	if err != nil {
-		return err
-	}
-	if tlsCfg == nil {
-		tlsCfg = &tls.Config{}
-	}
-
-	c.tlsCfg = tlsCfg
-
-	return nil
+	return urls, nil
 }
 
 func init() {
 	inputs.Add("x509_cert", func() telegraf.Input {
 		return &X509Cert{
-			Sources: []string{},
-			Timeout: internal.Duration{Duration: 5},
+			Timeout: config.Duration(5 * time.Second),
 		}
 	})
 }

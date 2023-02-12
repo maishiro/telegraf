@@ -1,17 +1,22 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package application_insights
 
 import (
+	_ "embed"
 	"fmt"
-	"log"
 	"math"
 	"time"
 	"unsafe"
 
-	"github.com/Microsoft/ApplicationInsights-Go/appinsights"
+	"github.com/microsoft/ApplicationInsights-Go/appinsights"
+
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/plugins/outputs"
 )
+
+//go:embed sample.conf
+var sampleConfig string
 
 type TelemetryTransmitter interface {
 	Track(appinsights.Telemetry)
@@ -23,65 +28,39 @@ type DiagnosticsMessageSubscriber interface {
 }
 
 type ApplicationInsights struct {
-	InstrumentationKey      string
-	Timeout                 internal.Duration
-	EnableDiagnosticLogging bool
-	ContextTagSources       map[string]string
-	diagMsgSubscriber       DiagnosticsMessageSubscriber
-	transmitter             TelemetryTransmitter
-	diagMsgListener         appinsights.DiagnosticsMessageListener
+	InstrumentationKey      string            `toml:"instrumentation_key"`
+	EndpointURL             string            `toml:"endpoint_url"`
+	Timeout                 config.Duration   `toml:"timeout"`
+	EnableDiagnosticLogging bool              `toml:"enable_diagnostic_logging"`
+	ContextTagSources       map[string]string `toml:"context_tag_sources"`
+	Log                     telegraf.Logger   `toml:"-"`
+
+	diagMsgSubscriber DiagnosticsMessageSubscriber
+	transmitter       TelemetryTransmitter
+	diagMsgListener   appinsights.DiagnosticsMessageListener
 }
 
-const (
-	Error   = "E! "
-	Warning = "W! "
-	Info    = "I! "
-	Debug   = "D! "
-)
-
 var (
-	sampleConfig = `
-  ## Instrumentation key of the Application Insights resource.
-  instrumentation_key = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxx"
-
-  ## Timeout for closing (default: 5s).
-  # timeout = "5s"
-
-  ## Enable additional diagnostic logging.
-  # enable_diagnostic_logging = false
-
-  ## Context Tag Sources add Application Insights context tags to a tag value.
-  ##
-  ## For list of allowed context tag keys see:
-  ## https://github.com/Microsoft/ApplicationInsights-Go/blob/master/appinsights/contracts/contexttagkeys.go
-  # [outputs.application_insights.context_tag_sources]
-  #   "ai.cloud.role" = "kubernetes_container_name"
-  #   "ai.cloud.roleInstance" = "kubernetes_pod_name"
-`
 	is32Bit        bool
 	is32BitChecked bool
 )
 
-func (a *ApplicationInsights) SampleConfig() string {
+func (*ApplicationInsights) SampleConfig() string {
 	return sampleConfig
-}
-
-func (a *ApplicationInsights) Description() string {
-	return "Send metrics to Azure Application Insights"
 }
 
 func (a *ApplicationInsights) Connect() error {
 	if a.InstrumentationKey == "" {
-		return fmt.Errorf("Instrumentation key is required")
+		return fmt.Errorf("instrumentation key is required")
 	}
 
 	if a.transmitter == nil {
-		a.transmitter = NewTransmitter(a.InstrumentationKey)
+		a.transmitter = NewTransmitter(a.InstrumentationKey, a.EndpointURL)
 	}
 
 	if a.EnableDiagnosticLogging && a.diagMsgSubscriber != nil {
 		a.diagMsgListener = a.diagMsgSubscriber.Subscribe(func(msg string) error {
-			logOutputMsg(Info, "%s", msg)
+			a.Log.Info(msg)
 			return nil
 		})
 	}
@@ -113,9 +92,9 @@ func (a *ApplicationInsights) Close() error {
 
 	select {
 	case <-a.transmitter.Close():
-		logOutputMsg(Info, "Closed")
-	case <-time.After(a.Timeout.Duration):
-		logOutputMsg(Warning, "Close operation timed out after %v", a.Timeout.Duration)
+		a.Log.Info("Closed")
+	case <-time.After(time.Duration(a.Timeout)):
+		a.Log.Warnf("Close operation timed out after %v", time.Duration(a.Timeout))
 	}
 
 	return nil
@@ -135,18 +114,19 @@ func (a *ApplicationInsights) createTelemetry(metric telegraf.Metric) []appinsig
 		telemetry := a.createSimpleMetricTelemetry(metric, "value", false)
 		if telemetry != nil {
 			return []appinsights.Telemetry{telemetry}
-		} else {
-			return nil
 		}
-	} else {
-		// AppInsights does not support multi-dimensional metrics at the moment, so we need to disambiguate resulting telemetry
-		// by adding field name as the telemetry name suffix
-		retval := a.createTelemetryForUnusedFields(metric, nil)
-		return retval
+		return nil
 	}
+	// AppInsights does not support multi-dimensional metrics at the moment, so we need to disambiguate resulting telemetry
+	// by adding field name as the telemetry name suffix
+	return a.createTelemetryForUnusedFields(metric, nil)
 }
 
-func (a *ApplicationInsights) createSimpleMetricTelemetry(metric telegraf.Metric, fieldName string, useFieldNameInTelemetryName bool) *appinsights.MetricTelemetry {
+func (a *ApplicationInsights) createSimpleMetricTelemetry(
+	metric telegraf.Metric,
+	fieldName string,
+	useFieldNameInTelemetryName bool,
+) *appinsights.MetricTelemetry {
 	telemetryValue, err := getFloat64TelemetryPropertyValue([]string{fieldName}, metric, nil)
 	if err != nil {
 		return nil
@@ -227,8 +207,8 @@ func (a *ApplicationInsights) addContextTags(metric telegraf.Metric, telemetry a
 func getFloat64TelemetryPropertyValue(
 	candidateFields []string,
 	metric telegraf.Metric,
-	usedFields *[]string) (float64, error) {
-
+	usedFields *[]string,
+) (float64, error) {
 	for _, fieldName := range candidateFields {
 		fieldValue, found := metric.GetField(fieldName)
 		if !found {
@@ -247,14 +227,14 @@ func getFloat64TelemetryPropertyValue(
 		return metricValue, nil
 	}
 
-	return 0.0, fmt.Errorf("No field from the candidate list was found in the metric")
+	return 0.0, fmt.Errorf("no field from the candidate list was found in the metric")
 }
 
 func getIntTelemetryPropertyValue(
 	candidateFields []string,
 	metric telegraf.Metric,
-	usedFields *[]string) (int, error) {
-
+	usedFields *[]string,
+) (int, error) {
 	for _, fieldName := range candidateFields {
 		fieldValue, found := metric.GetField(fieldName)
 		if !found {
@@ -273,7 +253,7 @@ func getIntTelemetryPropertyValue(
 		return metricValue, nil
 	}
 
-	return 0, fmt.Errorf("No field from the candidate list was found in the metric")
+	return 0, fmt.Errorf("no field from the candidate list was found in the metric")
 }
 
 func contains(set []string, val string) bool {
@@ -316,11 +296,11 @@ func toInt(value interface{}) (int, error) {
 	case uint64:
 		if is32Bit {
 			if v > math.MaxInt32 {
-				return 0, fmt.Errorf("Value [%d] out of range of 32-bit integers", v)
+				return 0, fmt.Errorf("value [%d] out of range of 32-bit integers", v)
 			}
 		} else {
 			if v > math.MaxInt64 {
-				return 0, fmt.Errorf("Value [%d] out of range of 64-bit integers", v)
+				return 0, fmt.Errorf("value [%d] out of range of 64-bit integers", v)
 			}
 		}
 
@@ -329,7 +309,7 @@ func toInt(value interface{}) (int, error) {
 	case int64:
 		if is32Bit {
 			if v > math.MaxInt32 || v < math.MinInt32 {
-				return 0, fmt.Errorf("Value [%d] out of range of 32-bit integers", v)
+				return 0, fmt.Errorf("value [%d] out of range of 32-bit integers", v)
 			}
 		}
 
@@ -339,14 +319,10 @@ func toInt(value interface{}) (int, error) {
 	return 0.0, fmt.Errorf("[%s] cannot be converted to an int value", value)
 }
 
-func logOutputMsg(level string, format string, v ...interface{}) {
-	log.Printf(level+"[outputs.application_insights] "+format, v...)
-}
-
 func init() {
 	outputs.Add("application_insights", func() telegraf.Output {
 		return &ApplicationInsights{
-			Timeout:           internal.Duration{Duration: time.Second * 5},
+			Timeout:           config.Duration(time.Second * 5),
 			diagMsgSubscriber: diagnosticsMessageSubscriber{},
 			// It is very common to set Cloud.RoleName and Cloud.RoleInstance context properties, hence initial capacity of two
 			ContextTagSources: make(map[string]string, 2),

@@ -2,9 +2,19 @@
 
 The `rename` processor renames measurements, fields, and tags.
 
-### Configuration:
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Rename measurements, tags, and fields that pass through this filter.
 [[processors.rename]]
   ## Specify one sub-table per rename operation.
   [[processors.rename.replace]]
@@ -24,11 +34,11 @@ The `rename` processor renames measurements, fields, and tags.
     dest = "max"
 ```
 
-### Tags:
+## Tags
 
 No tags are applied by this processor, though it can alter them by renaming.
 
-### Example processing:
+## Example
 
 ```diff
 - network_interface_throughput,hostname=backend.example.com lower=10i,upper=1000i,mean=500i 1502489900000000000

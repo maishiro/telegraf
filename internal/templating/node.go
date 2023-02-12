@@ -68,7 +68,7 @@ func (n *node) recursiveSearch(lineParts []string) *Template {
 	// exclude last child from search if it is a wildcard. sort.Search expects
 	// a lexicographically sorted set of children and we have artificially sorted
 	// wildcards to the end of the child set
-	// wildcards will be searched seperately if no exact match is found
+	// wildcards will be searched separately if no exact match is found
 	if hasWildcard = n.children[length-1].value == "*"; hasWildcard {
 		length--
 	}
@@ -79,7 +79,7 @@ func (n *node) recursiveSearch(lineParts []string) *Template {
 
 	// given an exact match is found within children set
 	if i < length && n.children[i].value == lineParts[0] {
-		// decend into the matching node
+		// descend into the matching node
 		if tmpl := n.children[i].recursiveSearch(lineParts[1:]); tmpl != nil {
 			// given a template is found return it
 			return tmpl
@@ -105,16 +105,18 @@ type nodes []*node
 // less than a non-wildcard value.
 //
 // For example, the filters:
-//             "*.*"
-//             "servers.*"
-//             "servers.localhost"
-//             "*.localhost"
+//
+//	"*.*"
+//	"servers.*"
+//	"servers.localhost"
+//	"*.localhost"
 //
 // Would be sorted as:
-//             "servers.localhost"
-//             "servers.*"
-//             "*.localhost"
-//             "*.*"
+//
+//	"servers.localhost"
+//	"servers.*"
+//	"*.localhost"
+//	"*.*"
 func (n *nodes) Less(j, k int) bool {
 	if (*n)[j].value == "*" && (*n)[k].value != "*" {
 		return false

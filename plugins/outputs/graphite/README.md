@@ -1,14 +1,25 @@
 # Graphite Output Plugin
 
-This plugin writes to [Graphite](http://graphite.readthedocs.org/en/latest/index.html)
-via raw TCP.
+This plugin writes to [Graphite][1] via raw TCP.
 
 For details on the translation between Telegraf Metrics and Graphite output,
-see the [Graphite Data Format](../../../docs/DATA_FORMATS_OUTPUT.md)
+see the [Graphite Data Format][2].
 
-### Configuration:
+[1]: http://graphite.readthedocs.org/en/latest/index.html
+[2]: ../../../docs/DATA_FORMATS_OUTPUT.md
 
-```toml
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
+
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
 # Configuration for Graphite server to send metrics to
 [[outputs.graphite]]
   ## TCP endpoint for your graphite instance.
@@ -23,6 +34,24 @@ see the [Graphite Data Format](../../../docs/DATA_FORMATS_OUTPUT.md)
 
   ## Enable Graphite tags support
   # graphite_tag_support = false
+
+  ## Define how metric names and tags are sanitized; options are "strict", or "compatible"
+  ## strict - Default method, and backwards compatible with previous versionf of Telegraf
+  ## compatible - More relaxed sanitizing when using tags, and compatible with the graphite spec
+  # graphite_tag_sanitize_mode = "strict"
+
+  ## Character for separating metric name and field for Graphite tags
+  # graphite_separator = "."
+
+  ## Graphite templates patterns
+  ## 1. Template for cpu
+  ## 2. Template for disk*
+  ## 3. Default template
+  # templates = [
+  #  "cpu tags.measurement.host.field",
+  #  "disk* measurement.field",
+  #  "host.measurement.tags.field"
+  #]
 
   ## timeout in seconds for the write connection to graphite
   timeout = 2

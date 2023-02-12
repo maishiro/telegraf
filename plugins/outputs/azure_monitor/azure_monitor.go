@@ -1,37 +1,45 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package azure_monitor
 
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	_ "embed"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
-	"log"
+	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
+
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/selfstat"
 )
 
+//go:embed sample.conf
+var sampleConfig string
+
 // AzureMonitor allows publishing of metrics to the Azure Monitor custom metrics
 // service
 type AzureMonitor struct {
-	Timeout             internal.Duration
-	NamespacePrefix     string `toml:"namespace_prefix"`
-	StringsAsDimensions bool   `toml:"strings_as_dimensions"`
-	Region              string
-	ResourceID          string `toml:"resource_id"`
-	EndpointUrl         string `toml:"endpoint_url"`
+	Timeout             config.Duration
+	NamespacePrefix     string          `toml:"namespace_prefix"`
+	StringsAsDimensions bool            `toml:"strings_as_dimensions"`
+	Region              string          `toml:"region"`
+	ResourceID          string          `toml:"resource_id"`
+	EndpointURL         string          `toml:"endpoint_url"`
+	Log                 telegraf.Logger `toml:"-"`
 
 	url    string
 	auth   autorest.Authorizer
@@ -62,14 +70,14 @@ func (m *virtualMachineMetadata) ResourceID() string {
 			m.Compute.ResourceGroupName,
 			m.Compute.VMScaleSetName,
 		)
-	} else {
-		return fmt.Sprintf(
-			resourceIDTemplate,
-			m.Compute.SubscriptionID,
-			m.Compute.ResourceGroupName,
-			m.Compute.Name,
-		)
 	}
+
+	return fmt.Sprintf(
+		resourceIDTemplate,
+		m.Compute.SubscriptionID,
+		m.Compute.ResourceGroupName,
+		m.Compute.Name,
+	)
 }
 
 type dimension struct {
@@ -100,43 +108,7 @@ const (
 	maxRequestBodySize         = 4000000
 )
 
-var sampleConfig = `
-  ## Timeout for HTTP writes.
-  # timeout = "20s"
-
-  ## Set the namespace prefix, defaults to "Telegraf/<input-name>".
-  # namespace_prefix = "Telegraf/"
-
-  ## Azure Monitor doesn't have a string value type, so convert string
-  ## fields to dimensions (a.k.a. tags) if enabled. Azure Monitor allows
-  ## a maximum of 10 dimensions so Telegraf will only send the first 10
-  ## alphanumeric dimensions.
-  # strings_as_dimensions = false
-
-  ## Both region and resource_id must be set or be available via the
-  ## Instance Metadata service on Azure Virtual Machines.
-  #
-  ## Azure Region to publish metrics against.
-  ##   ex: region = "southcentralus"
-  # region = ""
-  #
-  ## The Azure Resource ID against which metric will be logged, e.g.
-  ##   ex: resource_id = "/subscriptions/<subscription_id>/resourceGroups/<resource_group>/providers/Microsoft.Compute/virtualMachines/<vm_name>"
-  # resource_id = ""
-
-  ## Optionally, if in Azure US Government, China or other sovereign
-  ## cloud environment, set appropriate REST endpoint for receiving
-  ## metrics. (Note: region may be unused in this context)
-  # endpoint_url = "https://monitoring.core.usgovcloudapi.net"
-`
-
-// Description provides a description of the plugin
-func (a *AzureMonitor) Description() string {
-	return "Send aggregate metrics to Azure Monitor"
-}
-
-// SampleConfig provides a sample configuration for the plugin
-func (a *AzureMonitor) SampleConfig() string {
+func (*AzureMonitor) SampleConfig() string {
 	return sampleConfig
 }
 
@@ -144,25 +116,16 @@ func (a *AzureMonitor) SampleConfig() string {
 func (a *AzureMonitor) Connect() error {
 	a.cache = make(map[time.Time]map[uint64]*aggregate, 36)
 
-	if a.Timeout.Duration == 0 {
-		a.Timeout.Duration = defaultRequestTimeout
+	if a.Timeout == 0 {
+		a.Timeout = config.Duration(defaultRequestTimeout)
 	}
 
-	a.client = &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-		},
-		Timeout: a.Timeout.Duration,
-	}
-
-	if a.NamespacePrefix == "" {
-		a.NamespacePrefix = defaultNamespacePrefix
-	}
+	a.initHTTPClient()
 
 	var err error
 	var region string
 	var resourceID string
-	var endpointUrl string
+	var endpointURL string
 
 	if a.Region == "" || a.ResourceID == "" {
 		// Pull region and resource identifier
@@ -177,8 +140,8 @@ func (a *AzureMonitor) Connect() error {
 	if a.ResourceID != "" {
 		resourceID = a.ResourceID
 	}
-	if a.EndpointUrl != "" {
-		endpointUrl = a.EndpointUrl
+	if a.EndpointURL != "" {
+		endpointURL = a.EndpointURL
 	}
 
 	if resourceID == "" {
@@ -187,17 +150,17 @@ func (a *AzureMonitor) Connect() error {
 		return fmt.Errorf("no region configured or available via VM instance metadata")
 	}
 
-	if endpointUrl == "" {
+	if endpointURL == "" {
 		a.url = fmt.Sprintf(urlTemplate, region, resourceID)
 	} else {
-		a.url = fmt.Sprintf(urlOverrideTemplate, endpointUrl, resourceID)
+		a.url = fmt.Sprintf(urlOverrideTemplate, endpointURL, resourceID)
 	}
 
-	log.Printf("D! Writing to Azure Monitor URL: %s", a.url)
+	a.Log.Debugf("Writing to Azure Monitor URL: %s", a.url)
 
 	a.auth, err = auth.NewAuthorizerFromEnvironmentWithResource(defaultAuthResource)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	a.Reset()
@@ -211,8 +174,17 @@ func (a *AzureMonitor) Connect() error {
 	return nil
 }
 
+func (a *AzureMonitor) initHTTPClient() {
+	a.client = &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		},
+		Timeout: time.Duration(a.Timeout),
+	}
+}
+
 // vmMetadata retrieves metadata about the current Azure VM
-func vmInstanceMetadata(c *http.Client) (string, string, error) {
+func vmInstanceMetadata(c *http.Client) (region string, resourceID string, err error) {
 	req, err := http.NewRequest("GET", vmInstanceMetadataURL, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("error creating request: %v", err)
@@ -225,7 +197,7 @@ func vmInstanceMetadata(c *http.Client) (string, string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", "", err
 	}
@@ -239,8 +211,8 @@ func vmInstanceMetadata(c *http.Client) (string, string, error) {
 		return "", "", err
 	}
 
-	region := metadata.Compute.Location
-	resourceID := metadata.ResourceID()
+	region = metadata.Compute.Location
+	resourceID = metadata.ResourceID()
 
 	return region, resourceID, nil
 }
@@ -283,14 +255,14 @@ func (a *AzureMonitor) Write(metrics []telegraf.Metric) error {
 		if azm, ok := azmetrics[id]; !ok {
 			amm, err := translate(m, a.NamespacePrefix)
 			if err != nil {
-				log.Printf("E! [outputs.azure_monitor]: could not create azure metric for %q; discarding point", m.Name())
+				a.Log.Errorf("Could not create azure metric for %q; discarding point", m.Name())
 				continue
 			}
 			azmetrics[id] = amm
 		} else {
 			amm, err := translate(m, a.NamespacePrefix)
 			if err != nil {
-				log.Printf("E! [outputs.azure_monitor]: could not create azure metric for %q; discarding point", m.Name())
+				a.Log.Errorf("Could not create azure metric for %q; discarding point", m.Name())
 				continue
 			}
 
@@ -305,7 +277,7 @@ func (a *AzureMonitor) Write(metrics []telegraf.Metric) error {
 		return nil
 	}
 
-	var body []byte
+	var body []byte //nolint:prealloc // There is no point in guessing the final capacity of this slice
 	for _, m := range azmetrics {
 		// Azure Monitor accepts new batches of points in new-line delimited
 		// JSON, following RFC 4288 (see https://github.com/ndjson/ndjson-spec).
@@ -356,13 +328,17 @@ func (a *AzureMonitor) send(body []byte) error {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		if err.(*url.Error).Unwrap() == context.DeadlineExceeded {
+			a.initHTTPClient()
+		}
+
 		return err
 	}
 	defer resp.Body.Close()
 
-	_, err = ioutil.ReadAll(resp.Body)
+	respbody, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("failed to write batch: [%v] %s", resp.StatusCode, resp.Status)
+		return fmt.Errorf("failed to write batch: [%v] %s: %s", resp.StatusCode, resp.Status, string(respbody))
 	}
 
 	return nil
@@ -370,29 +346,29 @@ func (a *AzureMonitor) send(body []byte) error {
 
 func hashIDWithTagKeysOnly(m telegraf.Metric) uint64 {
 	h := fnv.New64a()
-	h.Write([]byte(m.Name()))
-	h.Write([]byte("\n"))
+	h.Write([]byte(m.Name())) //nolint:revive // from hash.go: "It never returns an error"
+	h.Write([]byte("\n"))     //nolint:revive // from hash.go: "It never returns an error"
 	for _, tag := range m.TagList() {
 		if tag.Key == "" || tag.Value == "" {
 			continue
 		}
 
-		h.Write([]byte(tag.Key))
-		h.Write([]byte("\n"))
+		h.Write([]byte(tag.Key)) //nolint:revive // from hash.go: "It never returns an error"
+		h.Write([]byte("\n"))    //nolint:revive // from hash.go: "It never returns an error"
 	}
 	b := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(b, uint64(m.Time().UnixNano()))
-	h.Write(b[:n])
-	h.Write([]byte("\n"))
+	h.Write(b[:n])        //nolint:revive // from hash.go: "It never returns an error"
+	h.Write([]byte("\n")) //nolint:revive // from hash.go: "It never returns an error"
 	return h.Sum64()
 }
 
 func translate(m telegraf.Metric, prefix string) (*azureMonitorMetric, error) {
-	var dimensionNames []string
-	var dimensionValues []string
+	dimensionNames := make([]string, 0, len(m.TagList()))
+	dimensionValues := make([]string, 0, len(m.TagList()))
 	for _, tag := range m.TagList() {
 		// Azure custom metrics service supports up to 10 dimensions
-		if len(dimensionNames) > 10 {
+		if len(dimensionNames) >= 10 {
 			continue
 		}
 
@@ -577,10 +553,10 @@ func hashIDWithField(id uint64, fk string) uint64 {
 	h := fnv.New64a()
 	b := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(b, id)
-	h.Write(b[:n])
-	h.Write([]byte("\n"))
-	h.Write([]byte(fk))
-	h.Write([]byte("\n"))
+	h.Write(b[:n])        //nolint:revive // from hash.go: "It never returns an error"
+	h.Write([]byte("\n")) //nolint:revive // from hash.go: "It never returns an error"
+	h.Write([]byte(fk))   //nolint:revive // from hash.go: "It never returns an error"
+	h.Write([]byte("\n")) //nolint:revive // from hash.go: "It never returns an error"
 	return h.Sum64()
 }
 
@@ -603,7 +579,7 @@ func (a *AzureMonitor) Push() []telegraf.Metric {
 				tags[tag.name] = tag.value
 			}
 
-			m, err := metric.New(agg.name,
+			m := metric.New(agg.name,
 				tags,
 				map[string]interface{}{
 					"min":   agg.min,
@@ -613,10 +589,6 @@ func (a *AzureMonitor) Push() []telegraf.Metric {
 				},
 				tbucket,
 			)
-
-			if err != nil {
-				log.Printf("E! [outputs.azure_monitor]: could not create metric for aggregation %q; discarding point", agg.name)
-			}
 
 			metrics = append(metrics, m)
 		}
@@ -646,7 +618,8 @@ func (a *AzureMonitor) Reset() {
 func init() {
 	outputs.Add("azure_monitor", func() telegraf.Output {
 		return &AzureMonitor{
-			timeFunc: time.Now,
+			timeFunc:        time.Now,
+			NamespacePrefix: defaultNamespacePrefix,
 		}
 	})
 }

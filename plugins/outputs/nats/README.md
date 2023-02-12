@@ -2,13 +2,42 @@
 
 This plugin writes to a (list of) specified NATS instance(s).
 
-```toml
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
+
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Secret-store support
+
+This plugin supports secrets from secret-stores for the `username` and
+`password` option.
+See the [secret-store documentation][SECRETSTORE] for more details on how
+to use them.
+
+[SECRETSTORE]: ../../../docs/CONFIGURATION.md#secret-store-secrets
+
+## Configuration
+
+```toml @sample.conf
+# Send telegraf measurements to NATS
 [[outputs.nats]]
   ## URLs of NATS servers
   servers = ["nats://localhost:4222"]
+
+  ## Optional client name
+  # name = ""
+
   ## Optional credentials
   # username = ""
   # password = ""
+
+  ## Optional NATS 2.0 and NATS NGS compatible user credentials
+  # credentials = "/etc/telegraf/nats.creds"
+
   ## NATS subject for producer messages
   subject = "telegraf"
 

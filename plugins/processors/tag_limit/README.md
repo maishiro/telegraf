@@ -8,9 +8,19 @@ This can be useful when dealing with output systems (e.g. Stackdriver) that
 impose hard limits on the number of tags/labels per metric or where high
 levels of cardinality are computationally and/or financially expensive.
 
-### Configuration
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Restricts the number of tags that can pass through this filter and chooses which tags to preserve when over the limit.
 [[processors.tag_limit]]
   ## Maximum number of tags to preserve
   limit = 3
@@ -19,7 +29,7 @@ levels of cardinality are computationally and/or financially expensive.
   keep = ["environment", "region"]
 ```
 
-### Example
+## Example
 
 ```diff
 + throughput month=Jun,environment=qa,region=us-east1,lower=10i,upper=1000i,mean=500i 1560540094000000000
