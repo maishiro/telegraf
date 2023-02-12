@@ -1,13 +1,24 @@
-# Stackdriver Input Plugin
+# Stackdriver Google Cloud Monitoring Input Plugin
 
-Stackdriver gathers metrics from the [Stackdriver Monitoring API][stackdriver].
+Query data from Google Cloud Monitoring (formerly Stackdriver) using the
+[Cloud Monitoring API v3][stackdriver].
 
 This plugin accesses APIs which are [chargeable][pricing]; you might incur
 costs.
 
-### Configuration
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Gather timeseries from Google Cloud Platform v3 monitoring API
 [[inputs.stackdriver]]
   ## GCP Project
   project = "erudite-bloom-151019"
@@ -57,9 +68,9 @@ costs.
   ## For a list of aligner strings see:
   ##   https://cloud.google.com/monitoring/api/ref_v3/rpc/google.monitoring.v3#aligner
   # distribution_aggregation_aligners = [
-  # 	"ALIGN_PERCENTILE_99",
-  # 	"ALIGN_PERCENTILE_95",
-  # 	"ALIGN_PERCENTILE_50",
+  #  "ALIGN_PERCENTILE_99",
+  #  "ALIGN_PERCENTILE_95",
+  #  "ALIGN_PERCENTILE_50",
   # ]
 
   ## Filters can be added to reduce the number of time series matched.  All
@@ -68,9 +79,11 @@ costs.
   ##
   ## The logical operators when combining filters are defined statically using
   ## the following values:
-  ##   filter ::= <resource_labels> {AND <metric_labels>}
+  ##   filter ::= <resource_labels> {AND <metric_labels> AND <user_labels> AND <system_labels>}
   ##   resource_labels ::= <resource_labels> {OR <resource_label>}
   ##   metric_labels ::= <metric_labels> {OR <metric_label>}
+  ##   user_labels ::= <user_labels> {OR <user_label>}
+  ##   system_labels ::= <system_labels> {OR <system_label>}
   ##
   ## For more details, see https://cloud.google.com/monitoring/api/v3/filters
   #
@@ -83,23 +96,36 @@ costs.
   ## Metric labels refine the time series selection with the following expression:
   ##   metric.labels.<key> = <value>
   #  [[inputs.stackdriver.filter.metric_labels]]
-  #  	 key = "device_name"
-  #  	 value = 'one_of("sda", "sdb")'
+  #    key = "device_name"
+  #    value = 'one_of("sda", "sdb")'
+  #
+  ## User labels refine the time series selection with the following expression:
+  ##   metadata.user_labels."<key>" = <value>
+  #  [[inputs.stackdriver.filter.user_labels]]
+  #    key = "environment"
+  #    value = 'one_of("prod", "staging")'
+  #
+  ## System labels refine the time series selection with the following expression:
+  ##   metadata.system_labels."<key>" = <value>
+  #  [[inputs.stackdriver.filter.system_labels]]
+  #    key = "machine_type"
+  #    value = 'starts_with("e2-")'
 ```
 
-#### Authentication
+### Authentication
 
 It is recommended to use a service account to authenticate with the
 Stackdriver Monitoring API.  [Getting Started with Authentication][auth].
 
-### Metrics
+## Metrics
 
 Metrics are created using one of there patterns depending on if the value type
 is a scalar value, raw distribution buckets, or aligned bucket values.
 
 In all cases, the Stackdriver metric type is split on the last component into
 the measurement and field:
-```
+
+```sh
 compute.googleapis.com/instance/disk/read_bytes_count
 └──────────  measurement  ─────────┘ └──  field  ───┘
 ```
@@ -112,7 +138,6 @@ compute.googleapis.com/instance/disk/read_bytes_count
     - metric_labels
   - fields:
     - field
-
 
 **Distributions:**
 
@@ -131,7 +156,7 @@ represents the total number of items less than the `lt` tag.
     - field_range_min
     - field_range_max
 
-+ measurement
+- measurement
   - tags:
     - resource_labels
     - metric_labels
@@ -148,14 +173,16 @@ represents the total number of items less than the `lt` tag.
   - fields:
     - field_alignment_function
 
-### Troubleshooting
+## Troubleshooting
 
 When Telegraf is ran with `--debug`, detailed information about the performed
 queries will be logged.
 
-### Example Output
+## Example Output
+
+```shell
 ```
-```
+
 [stackdriver]: https://cloud.google.com/monitoring/api/v3/
 [auth]: https://cloud.google.com/docs/authentication/getting-started
 [pricing]: https://cloud.google.com/stackdriver/pricing#stackdriver_monitoring_services

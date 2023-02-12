@@ -1,10 +1,23 @@
-# socket_writer Plugin
+# Socket Writer Output Plugin
 
-The socket_writer plugin can write to a UDP, TCP, or unix socket.
+The socket writer plugin can write to a UDP, TCP, or unix socket.
 
-It can output data in any of the [supported output formats](https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md).
+It can output data in any of the [supported output formats][formats].
 
-```toml
+[formats]: ../../../docs/DATA_FORMATS_OUTPUT.md
+
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
+
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
 # Generic socket writer capable of handling multiple socket types.
 [[outputs.socket_writer]]
   ## URL to connect to
@@ -32,9 +45,14 @@ It can output data in any of the [supported output formats](https://github.com/i
   ## Defaults to the OS configuration.
   # keep_alive_period = "5m"
 
+  ## Content encoding for message payloads, can be set to "gzip" or to
+  ## "identity" to apply no encoding.
+  ##
+  # content_encoding = "identity"
+
   ## Data format to generate.
   ## Each data format has its own unique set of configuration options, read
   ## more about them here:
-  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_INPUT.md
+  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
   # data_format = "influx"
 ```

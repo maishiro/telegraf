@@ -2,18 +2,20 @@ package stackdriver
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/ptypes/timestamp"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/inputs"
-	"github.com/influxdata/telegraf/testutil"
+	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/api/distribution"
 	metricpb "google.golang.org/genproto/googleapis/api/metric"
 	"google.golang.org/genproto/googleapis/api/monitoredres"
-	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/inputs"
+	"github.com/influxdata/telegraf/testutil"
 )
 
 type Call struct {
@@ -27,6 +29,7 @@ type MockStackdriverClient struct {
 	CloseF                 func() error
 
 	calls []*Call
+	sync.Mutex
 }
 
 func (m *MockStackdriverClient) ListMetricDescriptors(
@@ -34,7 +37,9 @@ func (m *MockStackdriverClient) ListMetricDescriptors(
 	req *monitoringpb.ListMetricDescriptorsRequest,
 ) (<-chan *metricpb.MetricDescriptor, error) {
 	call := &Call{name: "ListMetricDescriptors", args: []interface{}{ctx, req}}
+	m.Lock()
 	m.calls = append(m.calls, call)
+	m.Unlock()
 	return m.ListMetricDescriptorsF(ctx, req)
 }
 
@@ -43,13 +48,17 @@ func (m *MockStackdriverClient) ListTimeSeries(
 	req *monitoringpb.ListTimeSeriesRequest,
 ) (<-chan *monitoringpb.TimeSeries, error) {
 	call := &Call{name: "ListTimeSeries", args: []interface{}{ctx, req}}
+	m.Lock()
 	m.calls = append(m.calls, call)
+	m.Unlock()
 	return m.ListTimeSeriesF(ctx, req)
 }
 
 func (m *MockStackdriverClient) Close() error {
 	call := &Call{name: "Close", args: []interface{}{}}
+	m.Lock()
 	m.calls = append(m.calls, call)
+	m.Unlock()
 	return m.CloseF()
 }
 
@@ -87,7 +96,78 @@ func TestGather(t *testing.T) {
 		descriptor *metricpb.MetricDescriptor
 		timeseries *monitoringpb.TimeSeries
 		expected   []telegraf.Metric
+		wantAccErr bool
 	}{
+		{
+			name: "no_bucket",
+			descriptor: &metricpb.MetricDescriptor{
+				ValueType: metricpb.MetricDescriptor_DISTRIBUTION,
+			},
+			timeseries: createTimeSeries(
+				&monitoringpb.Point{
+					Interval: &monitoringpb.TimeInterval{
+						EndTime: &timestamppb.Timestamp{
+							Seconds: now.Unix(),
+						},
+					},
+					Value: &monitoringpb.TypedValue{
+						Value: &monitoringpb.TypedValue_DistributionValue{
+							DistributionValue: &distribution.Distribution{
+								Count: 2,
+							},
+						},
+					},
+				},
+				metricpb.MetricDescriptor_DISTRIBUTION,
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric("",
+					map[string]string{
+						"project_id":    "test",
+						"resource_type": "global",
+					},
+					map[string]interface{}{
+						"value_count":                    2,
+						"value_mean":                     float64(0),
+						"value_sum_of_squared_deviation": float64(0),
+					},
+					now),
+			},
+			wantAccErr: true,
+		},
+		{
+			name: "int64",
+			descriptor: &metricpb.MetricDescriptor{
+				Type:      "telegraf/cpu/usage",
+				ValueType: metricpb.MetricDescriptor_INT64,
+			},
+			timeseries: createTimeSeries(
+				&monitoringpb.Point{
+					Interval: &monitoringpb.TimeInterval{
+						EndTime: &timestamppb.Timestamp{
+							Seconds: now.Unix(),
+						},
+					},
+					Value: &monitoringpb.TypedValue{
+						Value: &monitoringpb.TypedValue_Int64Value{
+							Int64Value: 42,
+						},
+					},
+				},
+				metricpb.MetricDescriptor_INT64,
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric("telegraf/cpu",
+					map[string]string{
+						"resource_type": "global",
+						"project_id":    "test",
+					},
+					map[string]interface{}{
+						"usage": 42,
+					},
+					now),
+			},
+		},
 		{
 			name: "double",
 			descriptor: &metricpb.MetricDescriptor{
@@ -97,7 +177,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -130,7 +210,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -163,7 +243,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -196,7 +276,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -241,7 +321,7 @@ func TestGather(t *testing.T) {
 				Points: []*monitoringpb.Point{
 					{
 						Interval: &monitoringpb.TimeInterval{
-							EndTime: &timestamp.Timestamp{
+							EndTime: &timestamppb.Timestamp{
 								Seconds: now.Unix(),
 							},
 						},
@@ -275,7 +355,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -370,7 +450,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -465,7 +545,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -548,7 +628,7 @@ func TestGather(t *testing.T) {
 			timeseries: createTimeSeries(
 				&monitoringpb.Point{
 					Interval: &monitoringpb.TimeInterval{
-						EndTime: &timestamp.Timestamp{
+						EndTime: &timestamppb.Timestamp{
 							Seconds: now.Unix(),
 						},
 					},
@@ -639,24 +719,27 @@ func TestGather(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var acc testutil.Accumulator
+			listMetricDescriptorsF := func(ctx context.Context, req *monitoringpb.ListMetricDescriptorsRequest) (<-chan *metricpb.MetricDescriptor, error) {
+				ch := make(chan *metricpb.MetricDescriptor, 1)
+				ch <- tt.descriptor
+				close(ch)
+				return ch, nil
+			}
+			listTimeSeriesF := func(ctx context.Context, req *monitoringpb.ListTimeSeriesRequest) (<-chan *monitoringpb.TimeSeries, error) {
+				ch := make(chan *monitoringpb.TimeSeries, 1)
+				ch <- tt.timeseries
+				close(ch)
+				return ch, nil
+			}
+
 			s := &Stackdriver{
 				Log:                          testutil.Logger{},
 				Project:                      "test",
 				RateLimit:                    10,
 				GatherRawDistributionBuckets: true,
 				client: &MockStackdriverClient{
-					ListMetricDescriptorsF: func(ctx context.Context, req *monitoringpb.ListMetricDescriptorsRequest) (<-chan *metricpb.MetricDescriptor, error) {
-						ch := make(chan *metricpb.MetricDescriptor, 1)
-						ch <- tt.descriptor
-						close(ch)
-						return ch, nil
-					},
-					ListTimeSeriesF: func(ctx context.Context, req *monitoringpb.ListTimeSeriesRequest) (<-chan *monitoringpb.TimeSeries, error) {
-						ch := make(chan *monitoringpb.TimeSeries, 1)
-						ch <- tt.timeseries
-						close(ch)
-						return ch, nil
-					},
+					ListMetricDescriptorsF: listMetricDescriptorsF,
+					ListTimeSeriesF:        listTimeSeriesF,
 					CloseF: func() error {
 						return nil
 					},
@@ -665,6 +748,8 @@ func TestGather(t *testing.T) {
 
 			err := s.Gather(&acc)
 			require.NoError(t, err)
+			require.Equalf(t, len(acc.Errors) > 0, tt.wantAccErr,
+				"Accumulator errors. got=%v, want=%t", acc.Errors, tt.wantAccErr)
 
 			actual := []telegraf.Metric{}
 			for _, m := range acc.Metrics {
@@ -694,7 +779,7 @@ func TestGatherAlign(t *testing.T) {
 				createTimeSeries(
 					&monitoringpb.Point{
 						Interval: &monitoringpb.TimeInterval{
-							EndTime: &timestamp.Timestamp{
+							EndTime: &timestamppb.Timestamp{
 								Seconds: now.Unix(),
 							},
 						},
@@ -709,7 +794,7 @@ func TestGatherAlign(t *testing.T) {
 				createTimeSeries(
 					&monitoringpb.Point{
 						Interval: &monitoringpb.TimeInterval{
-							EndTime: &timestamp.Timestamp{
+							EndTime: &timestamppb.Timestamp{
 								Seconds: now.Unix(),
 							},
 						},
@@ -724,7 +809,7 @@ func TestGatherAlign(t *testing.T) {
 				createTimeSeries(
 					&monitoringpb.Point{
 						Interval: &monitoringpb.TimeInterval{
-							EndTime: &timestamp.Timestamp{
+							EndTime: &timestamppb.Timestamp{
 								Seconds: now.Unix(),
 							},
 						},
@@ -752,9 +837,8 @@ func TestGatherAlign(t *testing.T) {
 			},
 		},
 	}
-	for _, tt := range tests {
+	for listCall, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			listCall := 0
 			var acc testutil.Accumulator
 			client := &MockStackdriverClient{
 				ListMetricDescriptorsF: func(ctx context.Context, req *monitoringpb.ListMetricDescriptorsRequest) (<-chan *metricpb.MetricDescriptor, error) {
@@ -766,7 +850,6 @@ func TestGatherAlign(t *testing.T) {
 				ListTimeSeriesF: func(ctx context.Context, req *monitoringpb.ListTimeSeriesRequest) (<-chan *monitoringpb.TimeSeries, error) {
 					ch := make(chan *monitoringpb.TimeSeries, 1)
 					ch <- tt.timeseries[listCall]
-					listCall++
 					close(ch)
 					return ch, nil
 				},
@@ -797,7 +880,6 @@ func TestGatherAlign(t *testing.T) {
 			}
 
 			testutil.RequireMetricsEqual(t, tt.expected, actual)
-
 		})
 	}
 }
@@ -1012,8 +1094,9 @@ func TestListMetricDescriptorFilter(t *testing.T) {
 					name:   "ListMetricDescriptors",
 					filter: `metric.type = starts_with("telegraf/cpu/usage")`,
 				}, {
-					name:   "ListTimeSeries",
-					filter: `metric.type = "telegraf/cpu/usage" AND (metric.labels.resource_type = "instance" OR metric.labels.resource_id = starts_with("abc-"))`,
+					name: "ListTimeSeries",
+					filter: `metric.type = "telegraf/cpu/usage" AND ` +
+						`(metric.labels.resource_type = "instance" OR metric.labels.resource_id = starts_with("abc-"))`,
 				},
 			},
 		},
@@ -1043,6 +1126,26 @@ func TestListMetricDescriptorFilter(t *testing.T) {
 							Value: `starts_with("abc-")`,
 						},
 					},
+					UserLabels: []*Label{
+						{
+							Key:   "team",
+							Value: "badgers",
+						},
+						{
+							Key:   "environment",
+							Value: `starts_with("prod-")`,
+						},
+					},
+					SystemLabels: []*Label{
+						{
+							Key:   "machine_type",
+							Value: "e2",
+						},
+						{
+							Key:   "machine_type",
+							Value: `starts_with("n2")`,
+						},
+					},
 				},
 				RateLimit: 1,
 			},
@@ -1055,8 +1158,12 @@ func TestListMetricDescriptorFilter(t *testing.T) {
 					name:   "ListMetricDescriptors",
 					filter: `metric.type = starts_with("telegraf/cpu/usage")`,
 				}, {
-					name:   "ListTimeSeries",
-					filter: `metric.type = "telegraf/cpu/usage" AND (resource.labels.instance_name = "localhost" OR resource.labels.zone = starts_with("us-")) AND (metric.labels.resource_type = "instance" OR metric.labels.resource_id = starts_with("abc-"))`,
+					name: "ListTimeSeries",
+					filter: `metric.type = "telegraf/cpu/usage" AND ` +
+						`(resource.labels.instance_name = "localhost" OR resource.labels.zone = starts_with("us-")) AND ` +
+						`(metric.labels.resource_type = "instance" OR metric.labels.resource_id = starts_with("abc-")) AND ` +
+						`(metadata.user_labels."team" = "badgers" OR metadata.user_labels."environment" = starts_with("prod-")) AND ` +
+						`(metadata.system_labels."machine_type" = "e2" OR metadata.system_labels."machine_type" = starts_with("n2"))`,
 				},
 			},
 		},
@@ -1076,7 +1183,7 @@ func TestListMetricDescriptorFilter(t *testing.T) {
 					ch <- createTimeSeries(
 						&monitoringpb.Point{
 							Interval: &monitoringpb.TimeInterval{
-								EndTime: &timestamp.Timestamp{
+								EndTime: &timestamppb.Timestamp{
 									Seconds: now.Unix(),
 								},
 							},
@@ -1120,8 +1227,8 @@ func TestListMetricDescriptorFilter(t *testing.T) {
 	}
 }
 
-func TestNewListTimeSeriesFilter(t *testing.T) {
+func TestNewListTimeSeriesFilter(_ *testing.T) {
 }
 
-func TestTimeSeriesConfCacheIsValid(t *testing.T) {
+func TestTimeSeriesConfCacheIsValid(_ *testing.T) {
 }

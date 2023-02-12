@@ -2,6 +2,7 @@ package cloud_pubsub
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"runtime"
@@ -10,12 +11,14 @@ import (
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"encoding/base64"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/plugins/parsers"
-	"github.com/influxdata/telegraf/plugins/serializers"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/api/support/bundler"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/plugins/parsers"
+	"github.com/influxdata/telegraf/plugins/parsers/influx"
+	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
 const (
@@ -59,17 +62,17 @@ type (
 )
 
 func getTestResources(tT *testing.T, settings pubsub.PublishSettings, testM []testMetric) (*PubSub, *stubTopic, []telegraf.Metric) {
-	s, _ := serializers.NewInfluxSerializer()
+	s := serializers.NewInfluxSerializer()
 
-	metrics := make([]telegraf.Metric, len(testM))
+	metrics := make([]telegraf.Metric, 0, len(testM))
 	t := &stubTopic{
 		T:         tT,
 		ReturnErr: make(map[string]bool),
 		published: make(map[string]*pubsub.Message),
 	}
 
-	for i, tm := range testM {
-		metrics[i] = tm.m
+	for _, tm := range testM {
+		metrics = append(metrics, tm.m)
 		if tm.returnErr {
 			v, _ := tm.m.GetField("value")
 			t.ReturnErr[v.(string)] = true
@@ -83,7 +86,7 @@ func getTestResources(tT *testing.T, settings pubsub.PublishSettings, testM []te
 		PublishCountThreshold: settings.CountThreshold,
 		PublishByteThreshold:  settings.ByteThreshold,
 		PublishNumGoroutines:  settings.NumGoroutines,
-		PublishTimeout:        internal.Duration{Duration: settings.Timeout},
+		PublishTimeout:        config.Duration(settings.Timeout),
 	}
 	ps.SetSerializer(s)
 
@@ -123,8 +126,7 @@ func (t *stubTopic) Publish(ctx context.Context, msg *pubsub.Message) publishRes
 	}
 
 	bundled := &bundledMsg{msg, r}
-	err := t.bundler.Add(bundled, len(msg.Data))
-	if err != nil {
+	if err := t.bundler.Add(bundled, len(msg.Data)); err != nil {
 		t.Fatalf("unexpected error while adding to bundle: %v", err)
 	}
 	return r
@@ -178,7 +180,9 @@ func (t *stubTopic) sendBundle() func(items interface{}) {
 }
 
 func (t *stubTopic) parseIDs(msg *pubsub.Message) []string {
-	p, _ := parsers.NewInfluxParser()
+	p := influx.Parser{}
+	err := p.Init()
+	require.NoError(t, err)
 	metrics, err := p.Parse(msg.Data)
 	if err != nil {
 		// Just attempt to base64-decode first before returning error.
@@ -192,10 +196,10 @@ func (t *stubTopic) parseIDs(msg *pubsub.Message) []string {
 		}
 	}
 
-	ids := make([]string, len(metrics))
-	for i, met := range metrics {
+	ids := make([]string, 0, len(metrics))
+	for _, met := range metrics {
 		id, _ := met.GetField("value")
-		ids[i] = id.(string)
+		ids = append(ids, id.(string))
 	}
 	return ids
 }
@@ -209,4 +213,10 @@ func (r *stubResult) Get(ctx context.Context) (string, error) {
 	case <-r.done:
 		return fmt.Sprintf("id-%s", r.metricIds[0]), nil
 	}
+}
+
+func (t *stubTopic) getBundleCount() int {
+	t.bLock.Lock()
+	defer t.bLock.Unlock()
+	return t.bundleCount
 }

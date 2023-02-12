@@ -3,12 +3,13 @@ package zipkin
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/testutil"
 )
@@ -614,7 +615,9 @@ func TestZipkinPlugin(t *testing.T) {
 			if err := postThriftData(tt.datafile, z.address, tt.contentType); err != nil {
 				t.Fatalf("Posting data to http endpoint /api/v1/spans failed. Error: %s\n", err)
 			}
-			mockAcc.Wait(len(tt.want)) //Since the server is running concurrently, we need to wait for the number of data points we want to test to be added to the Accumulator.
+			mockAcc.Wait(
+				len(tt.want),
+			) //Since the server is running concurrently, we need to wait for the number of data points we want to test to be added to the Accumulator.
 			if len(mockAcc.Errors) > 0 != tt.wantErr {
 				t.Fatalf("Got unexpected errors. want error = %v, errors = %v\n", tt.wantErr, mockAcc.Errors)
 			}
@@ -637,7 +640,7 @@ func TestZipkinPlugin(t *testing.T) {
 }
 
 func postThriftData(datafile, address, contentType string) error {
-	dat, err := ioutil.ReadFile(datafile)
+	dat, err := os.ReadFile(datafile)
 	if err != nil {
 		return fmt.Errorf("could not read from data file %s", datafile)
 	}
@@ -649,10 +652,12 @@ func postThriftData(datafile, address, contentType string) error {
 
 	req.Header.Set("Content-Type", contentType)
 	client := &http.Client{}
-	_, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP POST request to zipkin endpoint %s failed %v", address, err)
 	}
+
+	defer resp.Body.Close()
 
 	return nil
 }

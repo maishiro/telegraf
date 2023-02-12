@@ -11,9 +11,19 @@ discrete time series such as procstat, cgroup, kubernetes etc.
 When a series has not been updated within the time defined in
 `series_timeout`, the last metric is emitted with the `_final` appended.
 
-### Configuration
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
+# Report the final metric of a series
 [[aggregators.final]]
   ## The period on which to flush & clear the aggregator.
   period = "30s"
@@ -25,20 +35,21 @@ When a series has not been updated within the time defined in
   series_timeout = "5m"
 ```
 
-### Metrics
+## Metrics
 
 Measurement and tags are unchanged, fields are emitted with the suffix
 `_final`.
 
-### Example Output
+## Example Output
 
-```
+```text
 counter,host=bar i_final=3,j_final=6 1554281635115090133
 counter,host=foo i_final=3,j_final=6 1554281635112992012
 ```
 
 Original input:
-```
+
+```text
 counter,host=bar i=1,j=4 1554281633101153300
 counter,host=foo i=1,j=4 1554281633099323601
 counter,host=bar i=2,j=5 1554281634107980073

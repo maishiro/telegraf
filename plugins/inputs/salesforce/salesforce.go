@@ -1,11 +1,13 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package salesforce
 
 import (
+	_ "embed"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,24 +18,8 @@ import (
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
-var sampleConfig = `
-  ## specify your credentials
-  ##
-  username = "your_username"
-  password = "your_password"
-  ##
-  ## (optional) security token
-  # security_token = "your_security_token"
-  ##
-  ## (optional) environment type (sandbox or production)
-  ## default is: production
-  ##
-  # environment = "production"
-  ##
-  ## (optional) API version (default: "39.0")
-  ##
-  # version = "39.0"
-`
+//go:embed sample.conf
+var sampleConfig string
 
 type limit struct {
 	Max       int
@@ -61,11 +47,11 @@ const defaultEnvironment = "production"
 // returns a new Salesforce plugin instance
 func NewSalesforce() *Salesforce {
 	tr := &http.Transport{
-		ResponseHeaderTimeout: time.Duration(5 * time.Second),
+		ResponseHeaderTimeout: 5 * time.Second,
 	}
 	client := &http.Client{
 		Transport: tr,
-		Timeout:   time.Duration(10 * time.Second),
+		Timeout:   10 * time.Second,
 	}
 	return &Salesforce{
 		client:      client,
@@ -73,12 +59,8 @@ func NewSalesforce() *Salesforce {
 		Environment: defaultEnvironment}
 }
 
-func (s *Salesforce) SampleConfig() string {
+func (*Salesforce) SampleConfig() string {
 	return sampleConfig
-}
-
-func (s *Salesforce) Description() string {
-	return "Read API usage and limits for a Salesforce organisation"
 }
 
 // Reads limits values from Salesforce API
@@ -146,7 +128,7 @@ func (s *Salesforce) fetchLimits() (limits, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return l, fmt.Errorf("Salesforce responded with unexpected status code %d", resp.StatusCode)
+		return l, fmt.Errorf("salesforce responded with unexpected status code %d", resp.StatusCode)
 	}
 
 	l = limits{}
@@ -165,7 +147,7 @@ func (s *Salesforce) getLoginEndpoint() (string, error) {
 	}
 }
 
-// Authenticate with Salesfroce
+// Authenticate with Salesforce
 func (s *Salesforce) login() error {
 	if s.Username == "" || s.Password == "" {
 		return errors.New("missing username or password")
@@ -200,8 +182,13 @@ func (s *Salesforce) login() error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// ignore the err here; LimitReader returns io.EOF and we're not interested in read errors.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		return fmt.Errorf("%s returned HTTP status %s: %q", loginEndpoint, resp.Status, body)
+	}
 
-	respBody, err := ioutil.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

@@ -4,35 +4,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/plugins/parsers"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/influxdata/telegraf/plugins/parsers/grok"
+	"github.com/influxdata/telegraf/plugins/parsers/influx"
+	"github.com/influxdata/telegraf/plugins/parsers/json"
+	"github.com/influxdata/telegraf/plugins/parsers/logfmt"
+	"github.com/influxdata/telegraf/plugins/parsers/value"
+	"github.com/influxdata/telegraf/testutil"
 )
-
-//compares metrics without comparing time
-func compareMetrics(t *testing.T, expected, actual []telegraf.Metric) {
-	assert.Equal(t, len(expected), len(actual))
-	for i, metric := range actual {
-		require.Equal(t, expected[i].Name(), metric.Name())
-		require.Equal(t, expected[i].Fields(), metric.Fields())
-		require.Equal(t, expected[i].Tags(), metric.Tags())
-	}
-}
-
-func Metric(v telegraf.Metric, err error) telegraf.Metric {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
 
 func TestApply(t *testing.T) {
 	tests := []struct {
 		name         string
 		parseFields  []string
-		config       parsers.Config
+		parseTags    []string
+		parser       telegraf.Parser
 		dropOriginal bool
 		merge        string
 		input        telegraf.Metric
@@ -42,8 +32,7 @@ func TestApply(t *testing.T) {
 			name:         "parse one field drop original",
 			parseFields:  []string{"sample"},
 			dropOriginal: true,
-			config: parsers.Config{
-				DataFormat: "json",
+			parser: &json.Parser{
 				TagKeys: []string{
 					"ts",
 					"lvl",
@@ -51,18 +40,17 @@ func TestApply(t *testing.T) {
 					"method",
 				},
 			},
-			input: Metric(
-				metric.New(
-					"singleField",
-					map[string]string{
-						"some": "tag",
-					},
-					map[string]interface{}{
-						"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"singleField",
+				map[string]string{
+					"some": "tag",
+				},
+				map[string]interface{}{
+					"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"singleField",
 					map[string]string{
 						"ts":     "2018-07-24T19:43:40.275Z",
@@ -71,7 +59,7 @@ func TestApply(t *testing.T) {
 						"method": "POST",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
@@ -79,8 +67,7 @@ func TestApply(t *testing.T) {
 			parseFields:  []string{"sample"},
 			dropOriginal: false,
 			merge:        "override",
-			config: parsers.Config{
-				DataFormat: "json",
+			parser: &json.Parser{
 				TagKeys: []string{
 					"ts",
 					"lvl",
@@ -88,18 +75,17 @@ func TestApply(t *testing.T) {
 					"method",
 				},
 			},
-			input: Metric(
-				metric.New(
-					"singleField",
-					map[string]string{
-						"some": "tag",
-					},
-					map[string]interface{}{
-						"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"singleField",
+				map[string]string{
+					"some": "tag",
+				},
+				map[string]interface{}{
+					"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"singleField",
 					map[string]string{
 						"some":   "tag",
@@ -111,15 +97,14 @@ func TestApply(t *testing.T) {
 					map[string]interface{}{
 						"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
 					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "parse one field keep",
 			parseFields:  []string{"sample"},
 			dropOriginal: false,
-			config: parsers.Config{
-				DataFormat: "json",
+			parser: &json.Parser{
 				TagKeys: []string{
 					"ts",
 					"lvl",
@@ -127,7 +112,16 @@ func TestApply(t *testing.T) {
 					"method",
 				},
 			},
-			input: Metric(
+			input: metric.New(
+				"singleField",
+				map[string]string{
+					"some": "tag",
+				},
+				map[string]interface{}{
+					"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"singleField",
 					map[string]string{
@@ -136,18 +130,8 @@ func TestApply(t *testing.T) {
 					map[string]interface{}{
 						"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"singleField",
-					map[string]string{
-						"some": "tag",
-					},
-					map[string]interface{}{
-						"sample": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
-					},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"singleField",
 					map[string]string{
 						"ts":     "2018-07-24T19:43:40.275Z",
@@ -156,33 +140,30 @@ func TestApply(t *testing.T) {
 						"method": "POST",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
-			name:        "parse one field keep with measurement name",
-			parseFields: []string{"message"},
-			config: parsers.Config{
-				DataFormat: "influx",
-			},
+			name:         "parse one field keep with measurement name",
+			parseFields:  []string{"message"},
+			parser:       &influx.Parser{},
 			dropOriginal: false,
-			input: Metric(
+			input: metric.New(
+				"influxField",
+				map[string]string{},
+				map[string]interface{}{
+					"message": "deal,computer_name=hosta message=\"stuff\" 1530654676316265790",
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"influxField",
 					map[string]string{},
 					map[string]interface{}{
 						"message": "deal,computer_name=hosta message=\"stuff\" 1530654676316265790",
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"influxField",
-					map[string]string{},
-					map[string]interface{}{
-						"message": "deal,computer_name=hosta message=\"stuff\" 1530654676316265790",
-					},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"deal",
 					map[string]string{
 						"computer_name": "hosta",
@@ -190,7 +171,7 @@ func TestApply(t *testing.T) {
 					map[string]interface{}{
 						"message": "stuff",
 					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
@@ -198,21 +179,18 @@ func TestApply(t *testing.T) {
 			parseFields:  []string{"message"},
 			dropOriginal: false,
 			merge:        "override",
-			config: parsers.Config{
-				DataFormat: "influx",
-			},
-			input: Metric(
-				metric.New(
-					"influxField",
-					map[string]string{
-						"some": "tag",
-					},
-					map[string]interface{}{
-						"message": "deal,computer_name=hosta message=\"stuff\" 1530654676316265790",
-					},
-					time.Unix(0, 0))),
+			parser:       &influx.Parser{},
+			input: metric.New(
+				"influxField",
+				map[string]string{
+					"some": "tag",
+				},
+				map[string]interface{}{
+					"message": "deal,computer_name=hosta message=\"stuff\" 1530654676316265790",
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"deal",
 					map[string]string{
 						"computer_name": "hosta",
@@ -221,27 +199,27 @@ func TestApply(t *testing.T) {
 					map[string]interface{}{
 						"message": "stuff",
 					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "parse grok field",
 			parseFields:  []string{"grokSample"},
 			dropOriginal: true,
-			config: parsers.Config{
-				DataFormat:   "grok",
-				GrokPatterns: []string{"%{COMBINED_LOG_FORMAT}"},
+			parser: &grok.Parser{
+				Patterns: []string{"%{COMBINED_LOG_FORMAT}"},
 			},
-			input: Metric(
-				metric.New(
-					"success",
-					map[string]string{},
-					map[string]interface{}{
-						"grokSample": "127.0.0.1 - - [11/Dec/2013:00:01:45 -0800] \"GET /xampp/status.php HTTP/1.1\" 200 3891 \"http://cadenza/xampp/navi.php\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:25.0) Gecko/20100101 Firefox/25.0\"",
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"success",
+				map[string]string{},
+				map[string]interface{}{
+					"grokSample": "127.0.0.1 - - [11/Dec/2013:00:01:45 -0800] \"" +
+						"GET /xampp/status.php HTTP/1.1\" 200 3891 \"http://cadenza/xampp/navi.php\" \"Mozilla/5.0 (Macintosh; " +
+						"Intel Mac OS X 10.9; rv:25.0) Gecko/20100101 Firefox/25.0\"",
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"success",
 					map[string]string{
 						"resp_code": "200",
@@ -257,41 +235,39 @@ func TestApply(t *testing.T) {
 						"ident":        "-",
 						"http_version": float64(1.1),
 					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "parse two fields [replace]",
 			parseFields:  []string{"field_1", "field_2"},
 			dropOriginal: true,
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl", "err"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl", "err"},
 			},
-			input: Metric(
-				metric.New(
-					"bigMeasure",
-					map[string]string{},
-					map[string]interface{}{
-						"field_1": `{"lvl":"info","msg":"http request"}`,
-						"field_2": `{"err":"fatal","fatal":"security threat"}`,
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"bigMeasure",
+				map[string]string{},
+				map[string]interface{}{
+					"field_1": `{"lvl":"info","msg":"http request"}`,
+					"field_2": `{"err":"fatal","fatal":"security threat"}`,
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"bigMeasure",
 					map[string]string{
 						"lvl": "info",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"bigMeasure",
 					map[string]string{
 						"err": "fatal",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
@@ -299,21 +275,19 @@ func TestApply(t *testing.T) {
 			parseFields:  []string{"field_1", "field_2"},
 			dropOriginal: false,
 			merge:        "override",
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl", "msg", "err", "fatal"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl", "msg", "err", "fatal"},
 			},
-			input: Metric(
-				metric.New(
-					"bigMeasure",
-					map[string]string{},
-					map[string]interface{}{
-						"field_1": `{"lvl":"info","msg":"http request"}`,
-						"field_2": `{"err":"fatal","fatal":"security threat"}`,
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"bigMeasure",
+				map[string]string{},
+				map[string]interface{}{
+					"field_1": `{"lvl":"info","msg":"http request"}`,
+					"field_2": `{"err":"fatal","fatal":"security threat"}`,
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"bigMeasure",
 					map[string]string{
 						"lvl":   "info",
@@ -325,18 +299,25 @@ func TestApply(t *testing.T) {
 						"field_1": `{"lvl":"info","msg":"http request"}`,
 						"field_2": `{"err":"fatal","fatal":"security threat"}`,
 					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "parse two fields [keep]",
 			parseFields:  []string{"field_1", "field_2"},
 			dropOriginal: false,
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl", "msg", "err", "fatal"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl", "msg", "err", "fatal"},
 			},
-			input: Metric(
+			input: metric.New(
+				"bigMeasure",
+				map[string]string{},
+				map[string]interface{}{
+					"field_1": `{"lvl":"info","msg":"http request"}`,
+					"field_2": `{"err":"fatal","fatal":"security threat"}`,
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"bigMeasure",
 					map[string]string{},
@@ -344,43 +325,122 @@ func TestApply(t *testing.T) {
 						"field_1": `{"lvl":"info","msg":"http request"}`,
 						"field_2": `{"err":"fatal","fatal":"security threat"}`,
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"bigMeasure",
-					map[string]string{},
-					map[string]interface{}{
-						"field_1": `{"lvl":"info","msg":"http request"}`,
-						"field_2": `{"err":"fatal","fatal":"security threat"}`,
-					},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"bigMeasure",
 					map[string]string{
 						"lvl": "info",
 						"msg": "http request",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"bigMeasure",
 					map[string]string{
 						"err":   "fatal",
 						"fatal": "security threat",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
+			},
+		},
+		{
+			name:         "parse one tag drop original",
+			parseTags:    []string{"sample"},
+			dropOriginal: true,
+			parser:       &logfmt.Parser{},
+			input: metric.New(
+				"singleTag",
+				map[string]string{
+					"some":   "tag",
+					"sample": `ts=2018-07-24T19:43:40.275Z`,
+				},
+				map[string]interface{}{},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
+				metric.New(
+					"singleTag",
+					map[string]string{},
+					map[string]interface{}{
+						"ts": "2018-07-24T19:43:40.275Z",
+					},
+					time.Unix(0, 0)),
+			},
+		},
+		{
+			name:         "parse one tag with merge",
+			parseTags:    []string{"sample"},
+			dropOriginal: false,
+			merge:        "override",
+			parser:       &logfmt.Parser{},
+			input: metric.New(
+				"singleTag",
+				map[string]string{
+					"some":   "tag",
+					"sample": `ts=2018-07-24T19:43:40.275Z`,
+				},
+				map[string]interface{}{},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
+				metric.New(
+					"singleTag",
+					map[string]string{
+						"some":   "tag",
+						"sample": `ts=2018-07-24T19:43:40.275Z`,
+					},
+					map[string]interface{}{
+						"ts": "2018-07-24T19:43:40.275Z",
+					},
+					time.Unix(0, 0)),
+			},
+		},
+		{
+			name:         "parse one tag keep",
+			parseTags:    []string{"sample"},
+			dropOriginal: false,
+			parser:       &logfmt.Parser{},
+			input: metric.New(
+				"singleTag",
+				map[string]string{
+					"some":   "tag",
+					"sample": `ts=2018-07-24T19:43:40.275Z`,
+				},
+				map[string]interface{}{},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
+				metric.New(
+					"singleTag",
+					map[string]string{
+						"some":   "tag",
+						"sample": `ts=2018-07-24T19:43:40.275Z`,
+					},
+					map[string]interface{}{},
+					time.Unix(0, 0)),
+				metric.New(
+					"singleTag",
+					map[string]string{},
+					map[string]interface{}{
+						"ts": "2018-07-24T19:43:40.275Z",
+					},
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "Fail to parse one field but parses other [keep]",
 			parseFields:  []string{"good", "bad"},
 			dropOriginal: false,
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl"},
 			},
-			input: Metric(
+			input: metric.New(
+				"success",
+				map[string]string{},
+				map[string]interface{}{
+					"good": `{"lvl":"info"}`,
+					"bad":  "why",
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"success",
 					map[string]string{},
@@ -388,34 +448,33 @@ func TestApply(t *testing.T) {
 						"good": `{"lvl":"info"}`,
 						"bad":  "why",
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"success",
-					map[string]string{},
-					map[string]interface{}{
-						"good": `{"lvl":"info"}`,
-						"bad":  "why",
-					},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"success",
 					map[string]string{
 						"lvl": "info",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "Fail to parse one field but parses other [keep] v2",
 			parseFields:  []string{"bad", "good", "ok"},
 			dropOriginal: false,
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl", "thing"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl", "thing"},
 			},
-			input: Metric(
+			input: metric.New(
+				"success",
+				map[string]string{},
+				map[string]interface{}{
+					"bad":  "why",
+					"good": `{"lvl":"info"}`,
+					"ok":   `{"thing":"thang"}`,
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"success",
 					map[string]string{},
@@ -424,31 +483,21 @@ func TestApply(t *testing.T) {
 						"good": `{"lvl":"info"}`,
 						"ok":   `{"thing":"thang"}`,
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"success",
-					map[string]string{},
-					map[string]interface{}{
-						"bad":  "why",
-						"good": `{"lvl":"info"}`,
-						"ok":   `{"thing":"thang"}`,
-					},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"success",
 					map[string]string{
 						"lvl": "info",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
-				Metric(metric.New(
+					time.Unix(0, 0)),
+				metric.New(
 					"success",
 					map[string]string{
 						"thing": "thang",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
@@ -456,23 +505,21 @@ func TestApply(t *testing.T) {
 			parseFields:  []string{"good", "bad"},
 			dropOriginal: false,
 			merge:        "override",
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl"},
 			},
-			input: Metric(
-				metric.New(
-					"success",
-					map[string]string{
-						"a": "tag",
-					},
-					map[string]interface{}{
-						"good": `{"lvl":"info"}`,
-						"bad":  "why",
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"success",
+				map[string]string{
+					"a": "tag",
+				},
+				map[string]interface{}{
+					"good": `{"lvl":"info"}`,
+					"bad":  "why",
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"success",
 					map[string]string{
 						"a":   "tag",
@@ -482,52 +529,99 @@ func TestApply(t *testing.T) {
 						"good": `{"lvl":"info"}`,
 						"bad":  "why",
 					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:         "Fail to parse one field but parses other [replace]",
 			parseFields:  []string{"good", "bad"},
 			dropOriginal: true,
-			config: parsers.Config{
-				DataFormat: "json",
-				TagKeys:    []string{"lvl"},
+			parser: &json.Parser{
+				TagKeys: []string{"lvl"},
 			},
-			input: Metric(
-				metric.New(
-					"success",
-					map[string]string{
-						"thing": "tag",
-					},
-					map[string]interface{}{
-						"good": `{"lvl":"info"}`,
-						"bad":  "why",
-					},
-					time.Unix(0, 0))),
+			input: metric.New(
+				"success",
+				map[string]string{
+					"thing": "tag",
+				},
+				map[string]interface{}{
+					"good": `{"lvl":"info"}`,
+					"bad":  "why",
+				},
+				time.Unix(0, 0)),
 			expected: []telegraf.Metric{
-				Metric(metric.New(
+				metric.New(
 					"success",
 					map[string]string{
 						"lvl": "info",
 					},
 					map[string]interface{}{},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
+			},
+		},
+		{
+			name:        "parser without metric name (issue #12115)",
+			parseFields: []string{"value"},
+			merge:       "override",
+			// Create parser the config way with the name of the parent plugin.
+			parser: func() telegraf.Parser {
+				p := parsers.Parsers["value"]("parser")
+				vp := p.(*value.Parser)
+				vp.DataType = "float"
+				vp.FieldName = "value"
+				return vp
+			}(),
+			input: metric.New(
+				"myname",
+				map[string]string{},
+				map[string]interface{}{"value": "7.2"},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
+				metric.New(
+					"myname",
+					map[string]string{},
+					map[string]interface{}{"value": float64(7.2)},
+					time.Unix(0, 0)),
+			},
+		},
+		{
+			name:        "parser with metric name (issue #12115)",
+			parseFields: []string{"value"},
+			merge:       "override",
+			// Create parser the config way with the name of the parent plugin.
+			parser: parsers.Parsers["influx"]("parser"),
+			input: metric.New(
+				"myname",
+				map[string]string{},
+				map[string]interface{}{"value": "test value=7.2"},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
+				metric.New(
+					"test",
+					map[string]string{},
+					map[string]interface{}{"value": float64(7.2)},
+					time.Unix(0, 0)),
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser := Parser{
-				Config:       tt.config,
+			if p, ok := tt.parser.(telegraf.Initializer); ok {
+				require.NoError(t, p.Init())
+			}
+			plugin := Parser{
 				ParseFields:  tt.parseFields,
+				ParseTags:    tt.parseTags,
 				DropOriginal: tt.dropOriginal,
 				Merge:        tt.merge,
+				Log:          testutil.Logger{Name: "processor.parser"},
 			}
+			plugin.SetParser(tt.parser)
 
-			output := parser.Apply(tt.input)
+			output := plugin.Apply(tt.input)
 			t.Logf("Testing: %s", tt.name)
-			compareMetrics(t, tt.expected, output)
+			testutil.RequireMetricsEqual(t, tt.expected, output, testutil.IgnoreTime())
 		})
 	}
 }
@@ -536,87 +630,85 @@ func TestBadApply(t *testing.T) {
 	tests := []struct {
 		name        string
 		parseFields []string
-		config      parsers.Config
+		parser      telegraf.Parser
 		input       telegraf.Metric
 		expected    []telegraf.Metric
 	}{
 		{
 			name:        "field not found",
 			parseFields: []string{"bad_field"},
-			config: parsers.Config{
-				DataFormat: "json",
-			},
-			input: Metric(
+			parser:      &json.Parser{},
+			input: metric.New(
+				"bad",
+				map[string]string{},
+				map[string]interface{}{
+					"some_field": 5,
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"bad",
 					map[string]string{},
 					map[string]interface{}{
 						"some_field": 5,
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"bad",
-					map[string]string{},
-					map[string]interface{}{
-						"some_field": 5,
-					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 		{
 			name:        "non string field",
 			parseFields: []string{"some_field"},
-			config: parsers.Config{
-				DataFormat: "json",
-			},
-			input: Metric(
+			parser:      &json.Parser{},
+			input: metric.New(
+				"bad",
+				map[string]string{},
+				map[string]interface{}{
+					"some_field": 5,
+				},
+				time.Unix(0, 0)),
+			expected: []telegraf.Metric{
 				metric.New(
 					"bad",
 					map[string]string{},
 					map[string]interface{}{
 						"some_field": 5,
 					},
-					time.Unix(0, 0))),
-			expected: []telegraf.Metric{
-				Metric(metric.New(
-					"bad",
-					map[string]string{},
-					map[string]interface{}{
-						"some_field": 5,
-					},
-					time.Unix(0, 0))),
+					time.Unix(0, 0)),
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser := Parser{
-				Config:      tt.config,
-				ParseFields: tt.parseFields,
+			if p, ok := tt.parser.(telegraf.Initializer); ok {
+				require.NoError(t, p.Init())
 			}
 
-			output := parser.Apply(tt.input)
+			plugin := Parser{
+				ParseFields: tt.parseFields,
+				Log:         testutil.Logger{Name: "processor.parser"},
+			}
+			plugin.SetParser(tt.parser)
 
-			compareMetrics(t, output, tt.expected)
+			output := plugin.Apply(tt.input)
+			testutil.RequireMetricsEqual(t, tt.expected, output, testutil.IgnoreTime())
 		})
 	}
 }
 
 // Benchmarks
 
-func getMetricFields(metric telegraf.Metric) interface{} {
+func getMetricFields(m telegraf.Metric) interface{} {
 	key := "field3"
-	if value, ok := metric.Fields()[key]; ok {
-		return value
+	if v, ok := m.Fields()[key]; ok {
+		return v
 	}
 	return nil
 }
 
-func getMetricFieldList(metric telegraf.Metric) interface{} {
+func getMetricFieldList(m telegraf.Metric) interface{} {
 	key := "field3"
-	fields := metric.FieldList()
+	fields := m.FieldList()
 	for _, field := range fields {
 		if field.Key == key {
 			return field.Value
@@ -626,7 +718,7 @@ func getMetricFieldList(metric telegraf.Metric) interface{} {
 }
 
 func BenchmarkFieldListing(b *testing.B) {
-	metric := Metric(metric.New(
+	m := metric.New(
 		"test",
 		map[string]string{
 			"some": "tag",
@@ -640,15 +732,15 @@ func BenchmarkFieldListing(b *testing.B) {
 			"field5": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
 			"field6": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
 		},
-		time.Unix(0, 0)))
+		time.Unix(0, 0))
 
 	for n := 0; n < b.N; n++ {
-		getMetricFieldList(metric)
+		getMetricFieldList(m)
 	}
 }
 
 func BenchmarkFields(b *testing.B) {
-	metric := Metric(metric.New(
+	m := metric.New(
 		"test",
 		map[string]string{
 			"some": "tag",
@@ -662,9 +754,9 @@ func BenchmarkFields(b *testing.B) {
 			"field5": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
 			"field6": `{"ts":"2018-07-24T19:43:40.275Z","lvl":"info","msg":"http request","method":"POST"}`,
 		},
-		time.Unix(0, 0)))
+		time.Unix(0, 0))
 
 	for n := 0; n < b.N; n++ {
-		getMetricFields(metric)
+		getMetricFields(m)
 	}
 }

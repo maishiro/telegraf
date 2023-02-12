@@ -1,7 +1,6 @@
 package metric
 
 import (
-	"log"
 	"runtime"
 	"sync/atomic"
 
@@ -18,14 +17,10 @@ func WithTracking(metric telegraf.Metric, fn NotifyFunc) (telegraf.Metric, teleg
 	return newTrackingMetric(metric, fn)
 }
 
-// WithBatchTracking adds tracking to the metrics and registers the notify
+// WithGroupTracking adds tracking to the metrics and registers the notify
 // function to be called when processing is complete.
 func WithGroupTracking(metric []telegraf.Metric, fn NotifyFunc) ([]telegraf.Metric, telegraf.TrackingID) {
 	return newTrackingMetricGroup(metric, fn)
-}
-
-func EnableDebugFinalizer() {
-	finalizer = debugFinalizer
 }
 
 var (
@@ -34,15 +29,7 @@ var (
 )
 
 func newTrackingID() telegraf.TrackingID {
-	atomic.AddUint64(&lastID, 1)
-	return telegraf.TrackingID(lastID)
-}
-
-func debugFinalizer(d *trackingData) {
-	rc := atomic.LoadInt32(&d.rc)
-	if rc != 0 {
-		log.Fatalf("E! [agent] metric collected with non-zero reference count rc: %d", rc)
-	}
+	return telegraf.TrackingID(atomic.AddUint64(&lastID, 1))
 }
 
 type trackingData struct {
@@ -118,7 +105,6 @@ func newTrackingMetricGroup(group []telegraf.Metric, fn NotifyFunc) ([]telegraf.
 			d:      d,
 		}
 		group[i] = dm
-
 	}
 	if finalizer != nil {
 		runtime.SetFinalizer(d, finalizer)

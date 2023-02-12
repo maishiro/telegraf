@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSerialize(t *testing.T) {
@@ -108,6 +109,11 @@ http_requests_total{code="400",method="post"} 3
 				telegraf.Histogram,
 			),
 			expected: []byte(`
+# HELP http_request_duration_seconds Telegraf collected metric
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{le="+Inf"} 144320
+http_request_duration_seconds_sum 53423
+http_request_duration_seconds_count 144320
 `),
 		},
 		{
@@ -153,15 +159,36 @@ http_request_duration_seconds_count 0
 cpu_time_idle{host="example.org"} 42 1574279268000
 `),
 		},
+		{
+			name: "simple with CompactEncoding",
+			config: FormatConfig{
+				CompactEncoding: true,
+			},
+			metric: testutil.MustMetric(
+				"cpu",
+				map[string]string{
+					"host": "example.org",
+				},
+				map[string]interface{}{
+					"time_idle": 42.0,
+				},
+				time.Unix(1574279268, 0),
+			),
+			expected: []byte(`
+# TYPE cpu_time_idle untyped
+cpu_time_idle{host="example.org"} 42
+`),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := NewSerializer(FormatConfig{
+			s := NewSerializer(FormatConfig{
 				MetricSortOrder: SortMetrics,
 				TimestampExport: tt.config.TimestampExport,
 				StringHandling:  tt.config.StringHandling,
+				CompactEncoding: tt.config.CompactEncoding,
 			})
-			require.NoError(t, err)
+
 			actual, err := s.Serialize(tt.metric)
 			require.NoError(t, err)
 
@@ -412,12 +439,68 @@ cpu_time_idle 43
 `),
 		},
 		{
+			name: "colons are not replaced in metric name from measurement",
+			metrics: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu::xyzzy",
+					map[string]string{},
+					map[string]interface{}{
+						"time_idle": 42.0,
+					},
+					time.Unix(0, 0),
+				),
+			},
+			expected: []byte(`
+# HELP cpu::xyzzy_time_idle Telegraf collected metric
+# TYPE cpu::xyzzy_time_idle untyped
+cpu::xyzzy_time_idle 42
+`),
+		},
+		{
+			name: "colons are not replaced in metric name from field",
+			metrics: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"time:idle": 42.0,
+					},
+					time.Unix(0, 0),
+				),
+			},
+			expected: []byte(`
+# HELP cpu_time:idle Telegraf collected metric
+# TYPE cpu_time:idle untyped
+cpu_time:idle 42
+`),
+		},
+		{
 			name: "invalid label",
 			metrics: []telegraf.Metric{
 				testutil.MustMetric(
 					"cpu",
 					map[string]string{
 						"host-name": "example.org",
+					},
+					map[string]interface{}{
+						"time_idle": 42.0,
+					},
+					time.Unix(0, 0),
+				),
+			},
+			expected: []byte(`
+# HELP cpu_time_idle Telegraf collected metric
+# TYPE cpu_time_idle untyped
+cpu_time_idle{host_name="example.org"} 42
+`),
+		},
+		{
+			name: "colons are replaced in label name",
+			metrics: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{
+						"host:name": "example.org",
 					},
 					map[string]interface{}{
 						"time_idle": 42.0,
@@ -497,6 +580,28 @@ cpu_time_idle{cpu="cpu0"} 42
 `),
 		},
 		{
+			name: "replace characters when using string as label",
+			config: FormatConfig{
+				StringHandling: StringAsLabel,
+			},
+			metrics: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"host:name": "example.org",
+						"time_idle": 42.0,
+					},
+					time.Unix(1574279268, 0),
+				),
+			},
+			expected: []byte(`
+# HELP cpu_time_idle Telegraf collected metric
+# TYPE cpu_time_idle untyped
+cpu_time_idle{host_name="example.org"} 42
+`),
+		},
+		{
 			name: "multiple fields grouping",
 			metrics: []telegraf.Metric{
 				testutil.MustMetric(
@@ -569,15 +674,35 @@ cpu_time_user{cpu="cpu2"} 96034.08
 cpu_time_user{cpu="cpu3"} 94148
 `),
 		},
+		{
+			name: "summary with no quantile",
+			metrics: []telegraf.Metric{
+				testutil.MustMetric(
+					"prometheus",
+					map[string]string{},
+					map[string]interface{}{
+						"rpc_duration_seconds_sum":   1.7560473e+07,
+						"rpc_duration_seconds_count": 2693,
+					},
+					time.Unix(0, 0),
+					telegraf.Summary,
+				),
+			},
+			expected: []byte(`
+# HELP rpc_duration_seconds Telegraf collected metric
+# TYPE rpc_duration_seconds summary
+rpc_duration_seconds_sum 1.7560473e+07
+rpc_duration_seconds_count 2693
+`),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := NewSerializer(FormatConfig{
+			s := NewSerializer(FormatConfig{
 				MetricSortOrder: SortMetrics,
 				TimestampExport: tt.config.TimestampExport,
 				StringHandling:  tt.config.StringHandling,
 			})
-			require.NoError(t, err)
 			actual, err := s.SerializeBatch(tt.metrics)
 			require.NoError(t, err)
 

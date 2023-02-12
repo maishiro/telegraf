@@ -1,6 +1,8 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package marklogic
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,9 +12,12 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
+
+//go:embed sample.conf
+var sampleConfig string
 
 // Marklogic configuration toml
 type Marklogic struct {
@@ -82,33 +87,12 @@ type MlHost struct {
 	} `json:"host-status"`
 }
 
-// Description of plugin returned
-func (c *Marklogic) Description() string {
-	return "Retrives information on a specific host in a MarkLogic Cluster"
+func (*Marklogic) SampleConfig() string {
+	return sampleConfig
 }
-
-var sampleConfig = `
-  ## Base URL of the MarkLogic HTTP Server.
-  url = "http://localhost:8002"
-
-  ## List of specific hostnames to retrieve information. At least (1) required.
-  # hosts = ["hostname1", "hostname2"]
-
-  ## Using HTTP Basic Authentication. Management API requires 'manage-user' role privileges
-  # username = "myuser"
-  # password = "mypassword"
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-  ## Use TLS but skip chain & host verification
-  # insecure_skip_verify = false
-`
 
 // Init parse all source URLs and place on the Marklogic struct
 func (c *Marklogic) Init() error {
-
 	if len(c.URL) == 0 {
 		c.URL = "http://localhost:8002/"
 	}
@@ -127,11 +111,6 @@ func (c *Marklogic) Init() error {
 		c.Sources = append(c.Sources, u)
 	}
 	return nil
-}
-
-// SampleConfig to gather stats from localhost, default port.
-func (c *Marklogic) SampleConfig() string {
-	return sampleConfig
 }
 
 // Gather metrics from HTTP Server.
@@ -164,9 +143,9 @@ func (c *Marklogic) Gather(accumulator telegraf.Accumulator) error {
 	return nil
 }
 
-func (c *Marklogic) fetchAndInsertData(acc telegraf.Accumulator, url string) error {
+func (c *Marklogic) fetchAndInsertData(acc telegraf.Accumulator, address string) error {
 	ml := &MlHost{}
-	if err := c.gatherJSONData(url, ml); err != nil {
+	if err := c.gatherJSONData(address, ml); err != nil {
 		return err
 	}
 
@@ -220,14 +199,14 @@ func (c *Marklogic) createHTTPClient() (*http.Client, error) {
 		Transport: &http.Transport{
 			TLSClientConfig: tlsCfg,
 		},
-		Timeout: time.Duration(5 * time.Second),
+		Timeout: 5 * time.Second,
 	}
 
 	return client, nil
 }
 
-func (c *Marklogic) gatherJSONData(url string, v interface{}) error {
-	req, err := http.NewRequest("GET", url, nil)
+func (c *Marklogic) gatherJSONData(address string, v interface{}) error {
+	req, err := http.NewRequest("GET", address, nil)
 	if err != nil {
 		return err
 	}
@@ -246,11 +225,7 @@ func (c *Marklogic) gatherJSONData(url string, v interface{}) error {
 			response.StatusCode, http.StatusOK)
 	}
 
-	if err = json.NewDecoder(response.Body).Decode(v); err != nil {
-		return err
-	}
-
-	return nil
+	return json.NewDecoder(response.Body).Decode(v)
 }
 
 func init() {

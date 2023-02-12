@@ -14,11 +14,10 @@ type Filter interface {
 // for matching a given string against the filter list. The filter list
 // supports glob matching too, ie:
 //
-//   f, _ := Compile([]string{"cpu", "mem", "net*"})
-//   f.Match("cpu")     // true
-//   f.Match("network") // true
-//   f.Match("memory")  // false
-//
+//	f, _ := Compile([]string{"cpu", "mem", "net*"})
+//	f.Match("cpu")     // true
+//	f.Match("network") // true
+//	f.Match("memory")  // false
 func Compile(filters []string) (Filter, error) {
 	// return if there is nothing to compile
 	if len(filters) == 0 {
@@ -45,9 +44,17 @@ func Compile(filters []string) (Filter, error) {
 	}
 }
 
+func MustCompile(filters []string) Filter {
+	f, err := Compile(filters)
+	if err != nil {
+		panic(err)
+	}
+	return f
+}
+
 // hasMeta reports whether path contains any magic glob characters.
 func hasMeta(s string) bool {
-	return strings.IndexAny(s, "*?[") >= 0
+	return strings.ContainsAny(s, "*?[")
 }
 
 type filter struct {
@@ -79,13 +86,24 @@ func compileFilterNoGlob(filters []string) Filter {
 }
 
 type IncludeExcludeFilter struct {
-	include Filter
-	exclude Filter
+	include        Filter
+	exclude        Filter
+	includeDefault bool
+	excludeDefault bool
 }
 
 func NewIncludeExcludeFilter(
 	include []string,
 	exclude []string,
+) (Filter, error) {
+	return NewIncludeExcludeFilterDefaults(include, exclude, true, false)
+}
+
+func NewIncludeExcludeFilterDefaults(
+	include []string,
+	exclude []string,
+	includeDefault bool,
+	excludeDefault bool,
 ) (Filter, error) {
 	in, err := Compile(include)
 	if err != nil {
@@ -97,7 +115,7 @@ func NewIncludeExcludeFilter(
 		return nil, err
 	}
 
-	return &IncludeExcludeFilter{in, ex}, nil
+	return &IncludeExcludeFilter{in, ex, includeDefault, excludeDefault}, nil
 }
 
 func (f *IncludeExcludeFilter) Match(s string) bool {
@@ -105,12 +123,17 @@ func (f *IncludeExcludeFilter) Match(s string) bool {
 		if !f.include.Match(s) {
 			return false
 		}
+	} else if !f.includeDefault {
+		return false
 	}
 
 	if f.exclude != nil {
 		if f.exclude.Match(s) {
 			return false
 		}
+	} else if f.excludeDefault {
+		return false
 	}
+
 	return true
 }

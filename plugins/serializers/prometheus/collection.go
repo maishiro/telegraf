@@ -7,12 +7,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
-	"github.com/influxdata/telegraf"
 	dto "github.com/prometheus/client_model/go"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/influxdata/telegraf"
 )
 
 const helpString = "Telegraf collected metric"
+
+type TimeFunc func() time.Time
 
 type MetricFamily struct {
 	Name string
@@ -22,6 +25,7 @@ type MetricFamily struct {
 type Metric struct {
 	Labels    []LabelPair
 	Time      time.Time
+	AddTime   time.Time
 	Scaler    *Scaler
 	Histogram *Histogram
 	Summary   *Summary
@@ -52,10 +56,30 @@ type Histogram struct {
 	Sum     float64
 }
 
+func (h *Histogram) merge(b Bucket) {
+	for i := range h.Buckets {
+		if h.Buckets[i].Bound == b.Bound {
+			h.Buckets[i].Count = b.Count
+			return
+		}
+	}
+	h.Buckets = append(h.Buckets, b)
+}
+
 type Summary struct {
 	Quantiles []Quantile
 	Count     uint64
 	Sum       float64
+}
+
+func (s *Summary) merge(q Quantile) {
+	for i := range s.Quantiles {
+		if s.Quantiles[i].Quantile == q.Quantile {
+			s.Quantiles[i].Value = q.Value
+			return
+		}
+	}
+	s.Quantiles = append(s.Quantiles, q)
 }
 
 type MetricKey uint64
@@ -63,10 +87,10 @@ type MetricKey uint64
 func MakeMetricKey(labels []LabelPair) MetricKey {
 	h := fnv.New64a()
 	for _, label := range labels {
-		h.Write([]byte(label.Name))
-		h.Write([]byte("\x00"))
-		h.Write([]byte(label.Value))
-		h.Write([]byte("\x00"))
+		h.Write([]byte(label.Name))  //nolint:revive // from hash.go: "It never returns an error"
+		h.Write([]byte("\x00"))      //nolint:revive // from hash.go: "It never returns an error"
+		h.Write([]byte(label.Value)) //nolint:revive // from hash.go: "It never returns an error"
+		h.Write([]byte("\x00"))      //nolint:revive // from hash.go: "It never returns an error"
 	}
 	return MetricKey(h.Sum64())
 }
@@ -77,14 +101,14 @@ type Entry struct {
 }
 
 type Collection struct {
-	config  FormatConfig
 	Entries map[MetricFamily]Entry
+	config  FormatConfig
 }
 
 func NewCollection(config FormatConfig) *Collection {
 	cache := &Collection{
-		config:  config,
 		Entries: make(map[MetricFamily]Entry),
+		config:  config,
 	}
 	return cache
 }
@@ -113,7 +137,7 @@ func (c *Collection) createLabels(metric telegraf.Metric) []LabelPair {
 			}
 		}
 
-		name, ok := SanitizeName(tag.Key)
+		name, ok := SanitizeLabelName(tag.Key)
 		if !ok {
 			continue
 		}
@@ -132,7 +156,7 @@ func (c *Collection) createLabels(metric telegraf.Metric) []LabelPair {
 			continue
 		}
 
-		name, ok := SanitizeName(field.Key)
+		name, ok := SanitizeLabelName(field.Key)
 		if !ok {
 			continue
 		}
@@ -145,7 +169,6 @@ func (c *Collection) createLabels(metric telegraf.Metric) []LabelPair {
 
 		labels = append(labels, LabelPair{Name: name, Value: value})
 		addedFieldLabel = true
-
 	}
 
 	if addedFieldLabel {
@@ -157,11 +180,11 @@ func (c *Collection) createLabels(metric telegraf.Metric) []LabelPair {
 	return labels
 }
 
-func (c *Collection) Add(metric telegraf.Metric) {
+func (c *Collection) Add(metric telegraf.Metric, now time.Time) {
 	labels := c.createLabels(metric)
 	for _, field := range metric.FieldList() {
 		metricName := MetricName(metric.Name(), field.Key, metric.Type())
-		metricName, ok := SanitizeName(metricName)
+		metricName, ok := SanitizeMetricName(metricName)
 		if !ok {
 			continue
 		}
@@ -178,7 +201,6 @@ func (c *Collection) Add(metric telegraf.Metric) {
 				Metrics: make(map[MetricKey]*Metric),
 			}
 			c.Entries[family] = entry
-
 		}
 
 		metricKey := MakeMetricKey(labels)
@@ -205,20 +227,24 @@ func (c *Collection) Add(metric telegraf.Metric) {
 			}
 
 			m = &Metric{
-				Labels: labels,
-				Time:   metric.Time(),
-				Scaler: &Scaler{Value: value},
+				Labels:  labels,
+				Time:    metric.Time(),
+				AddTime: now,
+				Scaler:  &Scaler{Value: value},
 			}
 
-			// what if already here
 			entry.Metrics[metricKey] = m
 		case telegraf.Histogram:
 			if m == nil {
 				m = &Metric{
 					Labels:    labels,
 					Time:      metric.Time(),
+					AddTime:   now,
 					Histogram: &Histogram{},
 				}
+			} else {
+				m.Time = metric.Time()
+				m.AddTime = now
 			}
 			switch {
 			case strings.HasSuffix(field.Key, "_bucket"):
@@ -236,7 +262,7 @@ func (c *Collection) Add(metric telegraf.Metric) {
 					continue
 				}
 
-				m.Histogram.Buckets = append(m.Histogram.Buckets, Bucket{
+				m.Histogram.merge(Bucket{
 					Bound: bound,
 					Count: count,
 				})
@@ -264,8 +290,12 @@ func (c *Collection) Add(metric telegraf.Metric) {
 				m = &Metric{
 					Labels:  labels,
 					Time:    metric.Time(),
+					AddTime: now,
 					Summary: &Summary{},
 				}
+			} else {
+				m.Time = metric.Time()
+				m.AddTime = now
 			}
 			switch {
 			case strings.HasSuffix(field.Key, "_sum"):
@@ -297,7 +327,7 @@ func (c *Collection) Add(metric telegraf.Metric) {
 					continue
 				}
 
-				m.Summary.Quantiles = append(m.Summary.Quantiles, Quantile{
+				m.Summary.merge(Quantile{
 					Quantile: quantile,
 					Value:    value,
 				})
@@ -312,7 +342,7 @@ func (c *Collection) Expire(now time.Time, age time.Duration) {
 	expireTime := now.Add(-age)
 	for _, entry := range c.Entries {
 		for key, metric := range entry.Metrics {
-			if metric.Time.Before(expireTime) {
+			if metric.AddTime.Before(expireTime) {
 				delete(entry.Metrics, key)
 				if len(entry.Metrics) == 0 {
 					delete(c.Entries, entry.Family)
@@ -328,8 +358,7 @@ func (c *Collection) GetEntries(order MetricSortOrder) []Entry {
 		entries = append(entries, entry)
 	}
 
-	switch order {
-	case SortMetrics:
+	if order == SortMetrics {
 		sort.Slice(entries, func(i, j int) bool {
 			lhs := entries[i].Family
 			rhs := entries[j].Family
@@ -349,8 +378,7 @@ func (c *Collection) GetMetrics(entry Entry, order MetricSortOrder) []*Metric {
 		metrics = append(metrics, metric)
 	}
 
-	switch order {
-	case SortMetrics:
+	if order == SortMetrics {
 		sort.Slice(metrics, func(i, j int) bool {
 			lhs := metrics[i].Labels
 			rhs := metrics[j].Labels
@@ -384,8 +412,11 @@ func (c *Collection) GetProto() []*dto.MetricFamily {
 	for _, entry := range c.GetEntries(c.config.MetricSortOrder) {
 		mf := &dto.MetricFamily{
 			Name: proto.String(entry.Family.Name),
-			Help: proto.String(helpString),
 			Type: MetricType(entry.Family.Type),
+		}
+
+		if !c.config.CompactEncoding {
+			mf.Help = proto.String(helpString)
 		}
 
 		for _, metric := range c.GetMetrics(entry, c.config.MetricSortOrder) {
@@ -421,10 +452,6 @@ func (c *Collection) GetProto() []*dto.MetricFamily {
 					})
 				}
 
-				if len(buckets) == 0 {
-					continue
-				}
-
 				m.Histogram = &dto.Histogram{
 					Bucket:      buckets,
 					SampleCount: proto.Uint64(metric.Histogram.Count),
@@ -437,10 +464,6 @@ func (c *Collection) GetProto() []*dto.MetricFamily {
 						Quantile: proto.Float64(quantile.Quantile),
 						Value:    proto.Float64(quantile.Value),
 					})
-				}
-
-				if len(quantiles) == 0 {
-					continue
 				}
 
 				m.Summary = &dto.Summary{

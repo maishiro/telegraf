@@ -2,9 +2,26 @@
 
 The InfluxDB output plugin writes metrics to the [InfluxDB v2.x] HTTP service.
 
-### Configuration:
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Secret-store support
+
+This plugin supports secrets from secret-stores for the `token` option.
+See the [secret-store documentation][SECRETSTORE] for more details on how
+to use them.
+
+[SECRETSTORE]: ../../../docs/CONFIGURATION.md#secret-store-secrets
+
+## Configuration
+
+```toml @sample.conf
 # Configuration for sending metrics to InfluxDB 2.0
 [[outputs.influxdb_v2]]
   ## The URLs of the InfluxDB cluster nodes.
@@ -12,7 +29,7 @@ The InfluxDB output plugin writes metrics to the [InfluxDB v2.x] HTTP service.
   ## Multiple URLs can be specified for a single cluster, only ONE of the
   ## urls will be written to each interval.
   ##   ex: urls = ["https://us-west-2-1.aws.cloud2.influxdata.com"]
-  urls = ["http://127.0.0.1:9999"]
+  urls = ["http://127.0.0.1:8086"]
 
   ## Token for authentication.
   token = ""
@@ -58,4 +75,9 @@ The InfluxDB output plugin writes metrics to the [InfluxDB v2.x] HTTP service.
   # insecure_skip_verify = false
 ```
 
+## Metrics
+
+Reference the [influx serializer][] for details about metric production.
+
 [InfluxDB v2.x]: https://github.com/influxdata/influxdb
+[influx serializer]: /plugins/serializers/influx/README.md#Metrics

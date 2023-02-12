@@ -1,14 +1,46 @@
 # Kafka Output Plugin
 
-This plugin writes to a [Kafka Broker](http://kafka.apache.org/07/quickstart.html) acting a Kafka Producer.
+This plugin writes to a [Kafka
+Broker](http://kafka.apache.org/07/quickstart.html) acting a Kafka Producer.
 
-### Configuration:
-```toml
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
+
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Secret-store support
+
+This plugin supports secrets from secret-stores for the `sasl_username`,
+`sasl_password` and `sasl_access_token` option.
+See the [secret-store documentation][SECRETSTORE] for more details on how
+to use them.
+
+[SECRETSTORE]: ../../../docs/CONFIGURATION.md#secret-store-secrets
+
+## Configuration
+
+```toml @sample.conf
+# Configuration for the Kafka server to send metrics to
 [[outputs.kafka]]
   ## URLs of kafka brokers
+  ## The brokers listed here are used to connect to collect metadata about a
+  ## cluster. However, once the initial metadata collect is completed, telegraf
+  ## will communicate solely with the kafka leader and not all defined brokers.
   brokers = ["localhost:9092"]
+
   ## Kafka topic for producer messages
   topic = "telegraf"
+
+  ## The value of this tag will be used as the topic.  If not set the 'topic'
+  ## option is used.
+  # topic_tag = ""
+
+  ## If true, the 'topic_tag' will be removed from to the metric.
+  # exclude_topic_tag = false
 
   ## Optional Client id
   # client_id = "Telegraf"
@@ -46,24 +78,37 @@ This plugin writes to a [Kafka Broker](http://kafka.apache.org/07/quickstart.htm
   #   keys = ["foo", "bar"]
   #   separator = "_"
 
-  ## Telegraf tag to use as a routing key
-  ##  ie, if this tag exists, its value will be used as the routing key
+  ## The routing tag specifies a tagkey on the metric whose value is used as
+  ## the message key.  The message key is used to determine which partition to
+  ## send the message to.  This tag is prefered over the routing_key option.
   routing_tag = "host"
 
-  ## Static routing key.  Used when no routing_tag is set or as a fallback
-  ## when the tag specified in routing tag is not found.  If set to "random",
-  ## a random value will be generated for each message.
+  ## The routing key is set as the message key and used to determine which
+  ## partition to send the message to.  This value is only used when no
+  ## routing_tag is set or as a fallback when the tag specified in routing tag
+  ## is not found.
+  ##
+  ## If set to "random", a random value will be generated for each message.
+  ##
+  ## When unset, no message key is added and each message is routed to a random
+  ## partition.
+  ##
   ##   ex: routing_key = "random"
   ##       routing_key = "telegraf"
   # routing_key = ""
 
-  ## CompressionCodec represents the various compression codecs recognized by
+  ## Compression codec represents the various compression codecs recognized by
   ## Kafka in messages.
-  ##  0 : No compression
-  ##  1 : Gzip compression
-  ##  2 : Snappy compression
-  ##  3 : LZ4 compression
+  ##  0 : None
+  ##  1 : Gzip
+  ##  2 : Snappy
+  ##  3 : LZ4
+  ##  4 : ZSTD
   # compression_codec = 0
+
+  ## Idempotent Writes
+  ## If enabled, exactly one copy of each message is written.
+  # idempotent_writes = false
 
   ##  RequiredAcks is used in Produce Requests to tell the broker how many
   ##  replica acknowledgements it must see before responding
@@ -85,16 +130,54 @@ This plugin writes to a [Kafka Broker](http://kafka.apache.org/07/quickstart.htm
   ## until the next flush.
   # max_retry = 3
 
+  ## The maximum permitted size of a message. Should be set equal to or
+  ## smaller than the broker's 'message.max.bytes'.
+  # max_message_bytes = 1000000
+
   ## Optional TLS Config
+  # enable_tls = false
   # tls_ca = "/etc/telegraf/ca.pem"
   # tls_cert = "/etc/telegraf/cert.pem"
   # tls_key = "/etc/telegraf/key.pem"
   ## Use TLS but skip chain & host verification
   # insecure_skip_verify = false
 
+  ## Period between keep alive probes.
+  ## Defaults to the OS configuration if not specified or zero.
+  # keep_alive_period = "15s"
+
+  ## Optional SOCKS5 proxy to use when connecting to brokers
+  # socks5_enabled = true
+  # socks5_address = "127.0.0.1:1080"
+  # socks5_username = "alice"
+  # socks5_password = "pass123"
+
   ## Optional SASL Config
   # sasl_username = "kafka"
   # sasl_password = "secret"
+
+  ## Optional SASL:
+  ## one of: OAUTHBEARER, PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, GSSAPI
+  ## (defaults to PLAIN)
+  # sasl_mechanism = ""
+
+  ## used if sasl_mechanism is GSSAPI (experimental)
+  # sasl_gssapi_service_name = ""
+  # ## One of: KRB5_USER_AUTH and KRB5_KEYTAB_AUTH
+  # sasl_gssapi_auth_type = "KRB5_USER_AUTH"
+  # sasl_gssapi_kerberos_config_path = "/"
+  # sasl_gssapi_realm = "realm"
+  # sasl_gssapi_key_tab_path = ""
+  # sasl_gssapi_disable_pafxfast = false
+
+  ## used if sasl_mechanism is OAUTHBEARER (experimental)
+  # sasl_access_token = ""
+
+  ## SASL protocol version.  When connecting to Azure EventHub set to 0.
+  # sasl_version = 1
+
+  # Disable Kafka metadata full fetch
+  # metadata_full = false
 
   ## Data format to output.
   ## Each data format has its own unique set of configuration options, read
@@ -103,13 +186,13 @@ This plugin writes to a [Kafka Broker](http://kafka.apache.org/07/quickstart.htm
   # data_format = "influx"
 ```
 
-#### `max_retry`
+### `max_retry`
 
 This option controls the number of retries before a failure notification is
 displayed for each message when no acknowledgement is received from the
 broker. When the setting is greater than `0`, message latency can be reduced,
-duplicate messages can occur in cases of transient errors, and broker loads
-can increase during downtime.
+duplicate messages can occur in cases of transient errors, and broker loads can
+increase during downtime.
 
 The option is similar to the
 [retries](https://kafka.apache.org/documentation/#producerconfigs) Producer

@@ -17,7 +17,7 @@ func (a CollectionByKeys) Less(i, j int) bool { return a[i].numKeys < a[j].numKe
 
 // Checks to see if there is already a group with these tags and returns its index. Returns -1 if unavailable.
 func (a CollectionByKeys) IsAvailable(tags map[string]string) *DataGroup {
-	sort.Sort(CollectionByKeys(a))
+	sort.Sort(a)
 
 	// Iterate through all the groups and see if we have group with these tags
 	for _, group := range a {
@@ -30,12 +30,8 @@ func (a CollectionByKeys) IsAvailable(tags map[string]string) *DataGroup {
 
 		matchFound := true
 		for k, v := range tags {
-			if val, ok := group.tags[k]; ok {
-				if val != v {
-					matchFound = false
-					break
-				}
-			} else {
+			val, ok := group.tags[k]
+			if !ok || val != v {
 				matchFound = false
 				break
 			}

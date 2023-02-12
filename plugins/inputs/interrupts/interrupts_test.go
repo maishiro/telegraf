@@ -5,21 +5,25 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/influxdata/telegraf/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/influxdata/telegraf/testutil"
 )
 
 // =====================================================================================
 //	Setup and helper functions
 // =====================================================================================
 
-func expectCpuAsTags(m *testutil.Accumulator, t *testing.T, measurement string, irq IRQ) {
+func expectCPUAsTags(m *testutil.Accumulator, t *testing.T, measurement string, irq IRQ) {
 	for idx, value := range irq.Cpus {
-		m.AssertContainsTaggedFields(t, measurement, map[string]interface{}{"count": value}, map[string]string{"irq": irq.ID, "type": irq.Type, "device": irq.Device, "cpu": fmt.Sprintf("cpu%d", idx)})
+		m.AssertContainsTaggedFields(t, measurement,
+			map[string]interface{}{"count": value},
+			map[string]string{"irq": irq.ID, "type": irq.Type, "device": irq.Device, "cpu": fmt.Sprintf("cpu%d", idx)},
+		)
 	}
 }
 
-func expectCpuAsFields(m *testutil.Accumulator, t *testing.T, measurement string, irq IRQ) {
+func expectCPUAsFields(m *testutil.Accumulator, t *testing.T, measurement string, irq IRQ) {
 	fields := map[string]interface{}{}
 	total := int64(0)
 	for idx, count := range irq.Cpus {
@@ -70,7 +74,7 @@ func TestCpuAsTagsSoftIrqs(t *testing.T) {
 	reportMetrics("soft_interrupts", irqs, acc, true)
 
 	for _, irq := range softIrqsExpectedArgs {
-		expectCpuAsTags(acc, t, "soft_interrupts", irq)
+		expectCPUAsTags(acc, t, "soft_interrupts", irq)
 	}
 }
 
@@ -79,7 +83,7 @@ func TestCpuAsFieldsSoftIrqs(t *testing.T) {
 	reportMetrics("soft_interrupts", irqs, acc, false)
 
 	for _, irq := range softIrqsExpectedArgs {
-		expectCpuAsFields(acc, t, "soft_interrupts", irq)
+		expectCPUAsFields(acc, t, "soft_interrupts", irq)
 	}
 }
 
@@ -142,7 +146,7 @@ func TestCpuAsTagsHwIrqs(t *testing.T) {
 	reportMetrics("interrupts", irqs, acc, true)
 
 	for _, irq := range hwIrqsExpectedArgs {
-		expectCpuAsTags(acc, t, "interrupts", irq)
+		expectCPUAsTags(acc, t, "interrupts", irq)
 	}
 }
 
@@ -151,6 +155,6 @@ func TestCpuAsFieldsHwIrqs(t *testing.T) {
 	reportMetrics("interrupts", irqs, acc, false)
 
 	for _, irq := range hwIrqsExpectedArgs {
-		expectCpuAsFields(acc, t, "interrupts", irq)
+		expectCPUAsFields(acc, t, "interrupts", irq)
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/telegraf"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/performance"
@@ -20,6 +19,9 @@ import (
 	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 )
 
 // The highest number of metrics we can query for, no matter what settings
@@ -30,13 +32,13 @@ const absoluteMaxMetrics = 10000
 // a single Client is reused across all functions and goroutines, but the client
 // is periodically recycled to avoid authentication expiration issues.
 type ClientFactory struct {
-	client *Client
-	mux    sync.Mutex
-	url    *url.URL
-	parent *VSphere
+	client     *Client
+	mux        sync.Mutex
+	vSphereURL *url.URL
+	parent     *VSphere
 }
 
-// Client represents a connection to vSphere and is backed by a govmoni connection
+// Client represents a connection to vSphere and is backed by a govmomi connection
 type Client struct {
 	Client    *govmomi.Client
 	Views     *view.Manager
@@ -49,11 +51,11 @@ type Client struct {
 }
 
 // NewClientFactory creates a new ClientFactory and prepares it for use.
-func NewClientFactory(ctx context.Context, url *url.URL, parent *VSphere) *ClientFactory {
+func NewClientFactory(vSphereURL *url.URL, parent *VSphere) *ClientFactory {
 	return &ClientFactory{
-		client: nil,
-		parent: parent,
-		url:    url,
+		client:     nil,
+		parent:     parent,
+		vSphereURL: vSphereURL,
 	}
 }
 
@@ -66,40 +68,63 @@ func (cf *ClientFactory) GetClient(ctx context.Context) (*Client, error) {
 	for {
 		if cf.client == nil {
 			var err error
-			if cf.client, err = NewClient(ctx, cf.url, cf.parent); err != nil {
+			if cf.client, err = NewClient(ctx, cf.vSphereURL, cf.parent); err != nil {
 				return nil, err
 			}
 		}
 
-		// Execute a dummy call against the server to make sure the client is
-		// still functional. If not, try to log back in. If that doesn't work,
-		// we give up.
-		ctx1, cancel1 := context.WithTimeout(ctx, cf.parent.Timeout.Duration)
-		defer cancel1()
-		if _, err := methods.GetCurrentTime(ctx1, cf.client.Client); err != nil {
-			cf.parent.Log.Info("Client session seems to have time out. Reauthenticating!")
-			ctx2, cancel2 := context.WithTimeout(ctx, cf.parent.Timeout.Duration)
-			defer cancel2()
-			if err := cf.client.Client.SessionManager.Login(ctx2, url.UserPassword(cf.parent.Username, cf.parent.Password)); err != nil {
-				if !retrying {
-					// The client went stale. Probably because someone rebooted vCenter. Clear it to
-					// force us to create a fresh one. We only get one chance at this. If we fail a second time
-					// we will simply skip this collection round and hope things have stabilized for the next one.
-					retrying = true
-					cf.client = nil
-					continue
-				}
-				return nil, fmt.Errorf("renewing authentication failed: %s", err.Error())
+		err := cf.testClient(ctx)
+		if err != nil {
+			if !retrying {
+				// The client went stale. Probably because someone rebooted vCenter. Clear it to
+				// force us to create a fresh one. We only get one chance at this. If we fail a second time
+				// we will simply skip this collection round and hope things have stabilized for the next one.
+				retrying = true
+				cf.client = nil
+				continue
 			}
+			return nil, err
 		}
 
 		return cf.client, nil
 	}
 }
 
+func (cf *ClientFactory) testClient(ctx context.Context) error {
+	// Execute a dummy call against the server to make sure the client is
+	// still functional. If not, try to log back in. If that doesn't work,
+	// we give up.
+	ctx1, cancel1 := context.WithTimeout(ctx, time.Duration(cf.parent.Timeout))
+	defer cancel1()
+	if _, err := methods.GetCurrentTime(ctx1, cf.client.Client); err != nil {
+		cf.parent.Log.Info("Client session seems to have time out. Reauthenticating!")
+		ctx2, cancel2 := context.WithTimeout(ctx, time.Duration(cf.parent.Timeout))
+		defer cancel2()
+
+		// Resolving the secrets and construct the authentication info
+		username, err := cf.parent.Username.Get()
+		if err != nil {
+			return fmt.Errorf("getting username failed: %w", err)
+		}
+		defer config.ReleaseSecret(username)
+		password, err := cf.parent.Password.Get()
+		if err != nil {
+			return fmt.Errorf("getting password failed: %w", err)
+		}
+		defer config.ReleaseSecret(password)
+		auth := url.UserPassword(string(username), string(password))
+
+		if err := cf.client.Client.SessionManager.Login(ctx2, auth); err != nil {
+			return fmt.Errorf("renewing authentication failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // NewClient creates a new vSphere client based on the url and setting passed as parameters.
-func NewClient(ctx context.Context, u *url.URL, vs *VSphere) (*Client, error) {
-	sw := NewStopwatch("connect", u.Host)
+func NewClient(ctx context.Context, vSphereURL *url.URL, vs *VSphere) (*Client, error) {
+	sw := NewStopwatch("connect", vSphereURL.Host)
 	defer sw.Stop()
 
 	tlsCfg, err := vs.ClientConfig.TLSConfig()
@@ -110,15 +135,26 @@ func NewClient(ctx context.Context, u *url.URL, vs *VSphere) (*Client, error) {
 	if tlsCfg == nil {
 		tlsCfg = &tls.Config{}
 	}
-	if vs.Username != "" {
-		u.User = url.UserPassword(vs.Username, vs.Password)
+	if !vs.Username.Empty() {
+		// Resolving the secrets and construct the authentication info
+		username, err := vs.Username.Get()
+		if err != nil {
+			return nil, fmt.Errorf("getting username failed: %w", err)
+		}
+		defer config.ReleaseSecret(username)
+		password, err := vs.Password.Get()
+		if err != nil {
+			return nil, fmt.Errorf("getting password failed: %w", err)
+		}
+		defer config.ReleaseSecret(password)
+		vSphereURL.User = url.UserPassword(string(username), string(password))
 	}
 
-	vs.Log.Debugf("Creating client: %s", u.Host)
-	soapClient := soap.NewClient(u, tlsCfg.InsecureSkipVerify)
+	vs.Log.Debugf("Creating client: %s", vSphereURL.Host)
+	soapClient := soap.NewClient(vSphereURL, tlsCfg.InsecureSkipVerify)
 
 	// Add certificate if we have it. Use it to log us in.
-	if tlsCfg != nil && len(tlsCfg.Certificates) > 0 {
+	if len(tlsCfg.Certificates) > 0 {
 		soapClient.SetCertificate(tlsCfg.Certificates[0])
 	}
 
@@ -130,7 +166,7 @@ func NewClient(ctx context.Context, u *url.URL, vs *VSphere) (*Client, error) {
 		}
 	}
 
-	ctx1, cancel1 := context.WithTimeout(ctx, vs.Timeout.Duration)
+	ctx1, cancel1 := context.WithTimeout(ctx, time.Duration(vs.Timeout))
 	defer cancel1()
 	vimClient, err := vim25.NewClient(ctx1, soapClient)
 	if err != nil {
@@ -140,7 +176,7 @@ func NewClient(ctx context.Context, u *url.URL, vs *VSphere) (*Client, error) {
 
 	// If TSLKey is specified, try to log in as an extension using a cert.
 	if vs.TLSKey != "" {
-		ctx2, cancel2 := context.WithTimeout(ctx, vs.Timeout.Duration)
+		ctx2, cancel2 := context.WithTimeout(ctx, time.Duration(vs.Timeout))
 		defer cancel2()
 		if err := sm.LoginExtensionByCertificate(ctx2, vs.TLSKey); err != nil {
 			return nil, err
@@ -154,13 +190,13 @@ func NewClient(ctx context.Context, u *url.URL, vs *VSphere) (*Client, error) {
 	}
 
 	// Only login if the URL contains user information.
-	if u.User != nil {
-		if err := c.Login(ctx, u.User); err != nil {
+	if vSphereURL.User != nil {
+		if err := c.Login(ctx, vSphereURL.User); err != nil {
 			return nil, err
 		}
 	}
 
-	c.Timeout = vs.Timeout.Duration
+	c.Timeout = time.Duration(vs.Timeout)
 	m := view.NewManager(c.Client)
 
 	v, err := m.CreateContainerView(ctx, c.ServiceContent.RootFolder, []string{}, true)
@@ -177,10 +213,10 @@ func NewClient(ctx context.Context, u *url.URL, vs *VSphere) (*Client, error) {
 		Root:    v,
 		Perf:    p,
 		Valid:   true,
-		Timeout: vs.Timeout.Duration,
+		Timeout: time.Duration(vs.Timeout),
 	}
 	// Adjust max query size if needed
-	ctx3, cancel3 := context.WithTimeout(ctx, vs.Timeout.Duration)
+	ctx3, cancel3 := context.WithTimeout(ctx, time.Duration(vs.Timeout))
 	defer cancel3()
 	n, err := client.GetMaxQueryMetrics(ctx3)
 	if err != nil {

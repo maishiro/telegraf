@@ -1,66 +1,63 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package snmp_trap
 
 import (
-	"bufio"
-	"bytes"
+	_ "embed"
 	"fmt"
 	"net"
-	"os/exec"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/plugins/inputs"
+	"github.com/gosnmp/gosnmp"
 
-	"github.com/soniah/gosnmp"
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/internal/snmp"
+	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
-var defaultTimeout = internal.Duration{Duration: time.Second * 5}
+var defaultTimeout = config.Duration(time.Second * 5)
 
-type handler func(*gosnmp.SnmpPacket, *net.UDPAddr)
-type execer func(internal.Duration, string, ...string) ([]byte, error)
+//go:embed sample.conf
+var sampleConfig string
 
-type mibEntry struct {
-	mibName string
-	oidText string
+type translator interface {
+	lookup(oid string) (snmp.MibEntry, error)
 }
 
 type SnmpTrap struct {
-	ServiceAddress string            `toml:"service_address"`
-	Timeout        internal.Duration `toml:"timeout"`
+	ServiceAddress string          `toml:"service_address"`
+	Timeout        config.Duration `toml:"timeout" deprecated:"1.20.0;unused option"`
+	Version        string          `toml:"version"`
+	Translator     string          `toml:"-"`
+	Path           []string        `toml:"path"`
+
+	// Settings for version 3
+	// Values: "noAuthNoPriv", "authNoPriv", "authPriv"
+	SecLevel string        `toml:"sec_level"`
+	SecName  config.Secret `toml:"sec_name"`
+	// Values: "MD5", "SHA", "". Default: ""
+	AuthProtocol string        `toml:"auth_protocol"`
+	AuthPassword config.Secret `toml:"auth_password"`
+	// Values: "DES", "AES", "". Default: ""
+	PrivProtocol string        `toml:"priv_protocol"`
+	PrivPassword config.Secret `toml:"priv_password"`
 
 	acc      telegraf.Accumulator
 	listener *gosnmp.TrapListener
 	timeFunc func() time.Time
 	errCh    chan error
 
-	makeHandlerWrapper func(handler) handler
+	makeHandlerWrapper func(gosnmp.TrapHandlerFunc) gosnmp.TrapHandlerFunc
 
 	Log telegraf.Logger `toml:"-"`
 
-	cacheLock sync.Mutex
-	cache     map[string]mibEntry
-
-	execCmd execer
+	transl translator
 }
 
-var sampleConfig = `
-  ## Transport, local address, and port to listen on.  Transport must
-  ## be "udp://".  Omit local address to listen on all interfaces.
-  ##   example: "udp://127.0.0.1:1234"
-  # service_address = udp://:162
-  ## Timeout running snmptranslate command
-  # timeout = "5s"
-`
-
-func (s *SnmpTrap) SampleConfig() string {
+func (*SnmpTrap) SampleConfig() string {
 	return sampleConfig
-}
-
-func (s *SnmpTrap) Description() string {
-	return "Receive SNMP traps"
 }
 
 func (s *SnmpTrap) Gather(_ telegraf.Accumulator) error {
@@ -73,24 +70,33 @@ func init() {
 			timeFunc:       time.Now,
 			ServiceAddress: "udp://:162",
 			Timeout:        defaultTimeout,
+			Path:           []string{"/usr/share/snmp/mibs"},
+			Version:        "2c",
 		}
 	})
 }
 
-func realExecCmd(Timeout internal.Duration, arg0 string, args ...string) ([]byte, error) {
-	cmd := exec.Command(arg0, args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := internal.RunTimeout(cmd, Timeout.Duration)
-	if err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+func (s *SnmpTrap) SetTranslator(name string) {
+	s.Translator = name
 }
 
 func (s *SnmpTrap) Init() error {
-	s.cache = map[string]mibEntry{}
-	s.execCmd = realExecCmd
+	var err error
+	switch s.Translator {
+	case "gosmi":
+		s.transl, err = newGosmiTranslator(s.Path, s.Log)
+		if err != nil {
+			return err
+		}
+	case "netsnmp":
+		s.transl = newNetsnmpTranslator(s.Timeout)
+	default:
+		return fmt.Errorf("invalid translator value")
+	}
+
+	if err != nil {
+		s.Log.Errorf("Could not get path %v", err)
+	}
 	return nil
 }
 
@@ -99,6 +105,95 @@ func (s *SnmpTrap) Start(acc telegraf.Accumulator) error {
 	s.listener = gosnmp.NewTrapListener()
 	s.listener.OnNewTrap = makeTrapHandler(s)
 	s.listener.Params = gosnmp.Default
+
+	switch s.Version {
+	case "3":
+		s.listener.Params.Version = gosnmp.Version3
+	case "2c":
+		s.listener.Params.Version = gosnmp.Version2c
+	case "1":
+		s.listener.Params.Version = gosnmp.Version1
+	default:
+		s.listener.Params.Version = gosnmp.Version2c
+	}
+
+	if s.listener.Params.Version == gosnmp.Version3 {
+		s.listener.Params.SecurityModel = gosnmp.UserSecurityModel
+
+		switch strings.ToLower(s.SecLevel) {
+		case "noauthnopriv", "":
+			s.listener.Params.MsgFlags = gosnmp.NoAuthNoPriv
+		case "authnopriv":
+			s.listener.Params.MsgFlags = gosnmp.AuthNoPriv
+		case "authpriv":
+			s.listener.Params.MsgFlags = gosnmp.AuthPriv
+		default:
+			return fmt.Errorf("unknown security level '%s'", s.SecLevel)
+		}
+
+		var authenticationProtocol gosnmp.SnmpV3AuthProtocol
+		switch strings.ToLower(s.AuthProtocol) {
+		case "md5":
+			authenticationProtocol = gosnmp.MD5
+		case "sha":
+			authenticationProtocol = gosnmp.SHA
+		//case "sha224":
+		//	authenticationProtocol = gosnmp.SHA224
+		//case "sha256":
+		//	authenticationProtocol = gosnmp.SHA256
+		//case "sha384":
+		//	authenticationProtocol = gosnmp.SHA384
+		//case "sha512":
+		//	authenticationProtocol = gosnmp.SHA512
+		case "":
+			authenticationProtocol = gosnmp.NoAuth
+		default:
+			return fmt.Errorf("unknown authentication protocol '%s'", s.AuthProtocol)
+		}
+
+		var privacyProtocol gosnmp.SnmpV3PrivProtocol
+		switch strings.ToLower(s.PrivProtocol) {
+		case "aes":
+			privacyProtocol = gosnmp.AES
+		case "des":
+			privacyProtocol = gosnmp.DES
+		case "aes192":
+			privacyProtocol = gosnmp.AES192
+		case "aes192c":
+			privacyProtocol = gosnmp.AES192C
+		case "aes256":
+			privacyProtocol = gosnmp.AES256
+		case "aes256c":
+			privacyProtocol = gosnmp.AES256C
+		case "":
+			privacyProtocol = gosnmp.NoPriv
+		default:
+			return fmt.Errorf("unknown privacy protocol '%s'", s.PrivProtocol)
+		}
+
+		secname, err := s.SecName.Get()
+		if err != nil {
+			return fmt.Errorf("getting secname failed: %v", err)
+		}
+		privPasswd, err := s.PrivPassword.Get()
+		if err != nil {
+			return fmt.Errorf("getting secname failed: %v", err)
+		}
+		authPasswd, err := s.AuthPassword.Get()
+		if err != nil {
+			return fmt.Errorf("getting secname failed: %v", err)
+		}
+		s.listener.Params.SecurityParameters = &gosnmp.UsmSecurityParameters{
+			UserName:                 string(secname),
+			PrivacyProtocol:          privacyProtocol,
+			PrivacyPassphrase:        string(privPasswd),
+			AuthenticationPassphrase: string(authPasswd),
+			AuthenticationProtocol:   authenticationProtocol,
+		}
+		config.ReleaseSecret(secname)
+		config.ReleaseSecret(privPasswd)
+		config.ReleaseSecret(authPasswd)
+	}
 
 	// wrap the handler, used in unit tests
 	if nil != s.makeHandlerWrapper {
@@ -146,7 +241,13 @@ func (s *SnmpTrap) Stop() {
 	}
 }
 
-func makeTrapHandler(s *SnmpTrap) handler {
+func setTrapOid(tags map[string]string, oid string, e snmp.MibEntry) {
+	tags["oid"] = oid
+	tags["name"] = e.OidText
+	tags["mib"] = e.MibName
+}
+
+func makeTrapHandler(s *SnmpTrap) gosnmp.TrapHandlerFunc {
 	return func(packet *gosnmp.SnmpPacket, addr *net.UDPAddr) {
 		tm := s.timeFunc()
 		fields := map[string]interface{}{}
@@ -154,6 +255,33 @@ func makeTrapHandler(s *SnmpTrap) handler {
 
 		tags["version"] = packet.Version.String()
 		tags["source"] = addr.IP.String()
+
+		if packet.Version == gosnmp.Version1 {
+			// Follow the procedure described in RFC 2576 3.1 to
+			// translate a v1 trap to v2.
+			var trapOid string
+
+			if packet.GenericTrap >= 0 && packet.GenericTrap < 6 {
+				trapOid = ".1.3.6.1.6.3.1.1.5." + strconv.Itoa(packet.GenericTrap+1)
+			} else if packet.GenericTrap == 6 {
+				trapOid = packet.Enterprise + ".0." + strconv.Itoa(packet.SpecificTrap)
+			}
+
+			if trapOid != "" {
+				e, err := s.transl.lookup(trapOid)
+				if err != nil {
+					s.Log.Errorf("Error resolving V1 OID, oid=%s, source=%s: %v", trapOid, tags["source"], err)
+					return
+				}
+				setTrapOid(tags, trapOid, e)
+			}
+
+			if packet.AgentAddress != "" {
+				tags["agent_address"] = packet.AgentAddress
+			}
+
+			fields["sysUpTimeInstance"] = packet.Timestamp
+		}
 
 		for _, v := range packet.Variables {
 			// Use system mibs to resolve oids.  Don't fall back to
@@ -176,91 +304,51 @@ func makeTrapHandler(s *SnmpTrap) handler {
 					return
 				}
 
-				var e mibEntry
+				var e snmp.MibEntry
 				var err error
-				e, err = s.lookup(val)
+				e, err = s.transl.lookup(val)
 				if nil != err {
-					s.Log.Errorf("Error resolving value OID: %v", err)
+					s.Log.Errorf("Error resolving value OID, oid=%s, source=%s: %v", val, tags["source"], err)
 					return
 				}
 
-				value = e.oidText
+				value = e.OidText
 
 				// 1.3.6.1.6.3.1.1.4.1.0 is SNMPv2-MIB::snmpTrapOID.0.
 				// If v.Name is this oid, set a tag of the trap name.
 				if v.Name == ".1.3.6.1.6.3.1.1.4.1.0" {
-					tags["oid"] = val
-					tags["name"] = e.oidText
-					tags["mib"] = e.mibName
+					setTrapOid(tags, val, e)
 					continue
 				}
 			default:
 				value = v.Value
 			}
 
-			e, err := s.lookup(v.Name)
+			e, err := s.transl.lookup(v.Name)
 			if nil != err {
-				s.Log.Errorf("Error resolving OID: %v", err)
+				s.Log.Errorf("Error resolving OID oid=%s, source=%s: %v", v.Name, tags["source"], err)
 				return
 			}
 
-			name := e.oidText
+			name := e.OidText
 
 			fields[name] = value
 		}
 
+		if packet.Version == gosnmp.Version3 {
+			if packet.ContextName != "" {
+				tags["context_name"] = packet.ContextName
+			}
+			if packet.ContextEngineID != "" {
+				// SNMP RFCs like 3411 and 5343 show engine ID as a hex string
+				tags["engine_id"] = fmt.Sprintf("%x", packet.ContextEngineID)
+			}
+		} else {
+			if packet.Community != "" {
+				tags["community"] = packet.Community
+			}
+		}
+
 		s.acc.AddFields("snmp_trap", fields, tags, tm)
 	}
-}
-
-func (s *SnmpTrap) lookup(oid string) (e mibEntry, err error) {
-	s.cacheLock.Lock()
-	defer s.cacheLock.Unlock()
-	var ok bool
-	if e, ok = s.cache[oid]; !ok {
-		// cache miss.  exec snmptranlate
-		e, err = s.snmptranslate(oid)
-		if err == nil {
-			s.cache[oid] = e
-		}
-		return e, err
-	}
-	return e, nil
-}
-
-func (s *SnmpTrap) clear() {
-	s.cacheLock.Lock()
-	defer s.cacheLock.Unlock()
-	s.cache = map[string]mibEntry{}
-}
-
-func (s *SnmpTrap) load(oid string, e mibEntry) {
-	s.cacheLock.Lock()
-	defer s.cacheLock.Unlock()
-	s.cache[oid] = e
-}
-
-func (s *SnmpTrap) snmptranslate(oid string) (e mibEntry, err error) {
-	var out []byte
-	out, err = s.execCmd(s.Timeout, "snmptranslate", "-Td", "-Ob", "-m", "all", oid)
-
-	if err != nil {
-		return e, err
-	}
-
-	scanner := bufio.NewScanner(bytes.NewBuffer(out))
-	ok := scanner.Scan()
-	if err = scanner.Err(); !ok && err != nil {
-		return e, err
-	}
-
-	e.oidText = scanner.Text()
-
-	i := strings.Index(e.oidText, "::")
-	if i == -1 {
-		return e, fmt.Errorf("not found")
-	}
-	e.mibName = e.oidText[:i]
-	e.oidText = e.oidText[i+2:]
-	return e, nil
 }

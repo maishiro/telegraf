@@ -1,66 +1,41 @@
+//go:generate ../../../tools/readme_config_includer/generator
 package socket_writer
 
 import (
 	"crypto/tls"
+	_ "embed"
 	"fmt"
-	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal"
-	tlsint "github.com/influxdata/telegraf/internal/tls"
+	tlsint "github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
+//go:embed sample.conf
+var sampleConfig string
+
 type SocketWriter struct {
+	ContentEncoding string `toml:"content_encoding"`
 	Address         string
-	KeepAlivePeriod *internal.Duration
+	KeepAlivePeriod *config.Duration
 	tlsint.ClientConfig
+	Log telegraf.Logger `toml:"-"`
 
 	serializers.Serializer
+
+	encoder internal.ContentEncoder
 
 	net.Conn
 }
 
-func (sw *SocketWriter) Description() string {
-	return "Generic socket writer capable of handling multiple socket types."
-}
-
-func (sw *SocketWriter) SampleConfig() string {
-	return `
-  ## URL to connect to
-  # address = "tcp://127.0.0.1:8094"
-  # address = "tcp://example.com:http"
-  # address = "tcp4://127.0.0.1:8094"
-  # address = "tcp6://127.0.0.1:8094"
-  # address = "tcp6://[2001:db8::1]:8094"
-  # address = "udp://127.0.0.1:8094"
-  # address = "udp4://127.0.0.1:8094"
-  # address = "udp6://127.0.0.1:8094"
-  # address = "unix:///tmp/telegraf.sock"
-  # address = "unixgram:///tmp/telegraf.sock"
-
-  ## Optional TLS Config
-  # tls_ca = "/etc/telegraf/ca.pem"
-  # tls_cert = "/etc/telegraf/cert.pem"
-  # tls_key = "/etc/telegraf/key.pem"
-  ## Use TLS but skip chain & host verification
-  # insecure_skip_verify = false
-
-  ## Period between keep alive probes.
-  ## Only applies to TCP sockets.
-  ## 0 disables keep alive probes.
-  ## Defaults to the OS configuration.
-  # keep_alive_period = "5m"
-
-  ## Data format to generate.
-  ## Each data format has its own unique set of configuration options, read
-  ## more about them here:
-  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_INPUT.md
-  # data_format = "influx"
-`
+func (*SocketWriter) SampleConfig() string {
+	return sampleConfig
 }
 
 func (sw *SocketWriter) SetSerializer(s serializers.Serializer) {
@@ -89,7 +64,12 @@ func (sw *SocketWriter) Connect() error {
 	}
 
 	if err := sw.setKeepAlive(c); err != nil {
-		log.Printf("unable to configure keep alive (%s): %s", sw.Address, err)
+		sw.Log.Debugf("Unable to configure keep alive (%s): %s", sw.Address, err)
+	}
+	//set encoder
+	sw.encoder, err = internal.NewContentEncoder(sw.ContentEncoding)
+	if err != nil {
+		return err
 	}
 
 	sw.Conn = c
@@ -104,13 +84,13 @@ func (sw *SocketWriter) setKeepAlive(c net.Conn) error {
 	if !ok {
 		return fmt.Errorf("cannot set keep alive on a %s socket", strings.SplitN(sw.Address, "://", 2)[0])
 	}
-	if sw.KeepAlivePeriod.Duration == 0 {
+	if *sw.KeepAlivePeriod == 0 {
 		return tcpc.SetKeepAlive(false)
 	}
 	if err := tcpc.SetKeepAlive(true); err != nil {
 		return err
 	}
-	return tcpc.SetKeepAlivePeriod(sw.KeepAlivePeriod.Duration)
+	return tcpc.SetKeepAlivePeriod(time.Duration(*sw.KeepAlivePeriod))
 }
 
 // Write writes the given metrics to the destination.
@@ -127,14 +107,21 @@ func (sw *SocketWriter) Write(metrics []telegraf.Metric) error {
 	for _, m := range metrics {
 		bs, err := sw.Serialize(m)
 		if err != nil {
-			log.Printf("D! [outputs.socket_writer] Could not serialize metric: %v", err)
+			sw.Log.Debugf("Could not serialize metric: %v", err)
 			continue
 		}
+
+		bs, err = sw.encoder.Encode(bs)
+		if err != nil {
+			sw.Log.Debugf("Could not encode metric: %v", err)
+			continue
+		}
+
 		if _, err := sw.Conn.Write(bs); err != nil {
 			//TODO log & keep going with remaining strings
-			if err, ok := err.(net.Error); !ok || !err.Temporary() {
+			if err, ok := err.(net.Error); ok {
 				// permanent error. close the connection
-				sw.Close()
+				sw.Close() //nolint:revive // There is another error which will be returned here
 				sw.Conn = nil
 				return fmt.Errorf("closing connection: %v", err)
 			}
@@ -156,7 +143,7 @@ func (sw *SocketWriter) Close() error {
 }
 
 func newSocketWriter() *SocketWriter {
-	s, _ := serializers.NewInfluxSerializer()
+	s := serializers.NewInfluxSerializer()
 	return &SocketWriter{
 		Serializer: s,
 	}

@@ -3,13 +3,19 @@
 The GCP PubSub plugin publishes metrics to a [Google Cloud PubSub][pubsub] topic
 as one of the supported [output data formats][].
 
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-### Configuration
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
-This section contains the default TOML to configure the plugin.  You can
-generate it using `telegraf --usage cloud_pubsub`.
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
 
-```toml
+## Configuration
+
+```toml @sample.conf
+# Publish Telegraf metrics to a Google Cloud PubSub topic
 [[outputs.cloud_pubsub]]
   ## Required. Name of Google Cloud Platform (GCP) Project that owns
   ## the given PubSub topic.
@@ -24,9 +30,9 @@ generate it using `telegraf --usage cloud_pubsub`.
   ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_INPUT.md
   data_format = "influx"
 
-  ## Optional. Filepath for GCP credentials JSON file to authorize calls to 
-  ## PubSub APIs. If not set explicitly, Telegraf will attempt to use 
-  ## Application Default Credentials, which is preferred. 
+  ## Optional. Filepath for GCP credentials JSON file to authorize calls to
+  ## PubSub APIs. If not set explicitly, Telegraf will attempt to use
+  ## Application Default Credentials, which is preferred.
   # credentials_file = "path/to/my/creds.json"
 
   ## Optional. If true, will send all metrics per write in one PubSub message.
@@ -51,12 +57,12 @@ generate it using `telegraf --usage cloud_pubsub`.
 
   ## Optional. Specifies a timeout for requests to the PubSub API.
   # publish_timeout = "30s"
-  
+
   ## Optional. If true, published PubSub message data will be base64-encoded.
   # base64_data = false
-  
+
   ## Optional. PubSub attributes to add to metrics.
-  # [[inputs.pubsub.attributes]]
+  # [outputs.cloud_pubsub.attributes]
   #   my_attr = "tag_value"
 ```
 

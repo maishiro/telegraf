@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/telegraf/plugins/parsers"
-	"github.com/influxdata/telegraf/testutil"
 	"github.com/nsqio/go-nsq"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/influxdata/telegraf/plugins/parsers/influx"
+	"github.com/influxdata/telegraf/testutil"
 )
 
 // This test is modeled after the kafka consumer integration test
@@ -22,18 +23,21 @@ func TestReadsMetricsFromNSQ(t *testing.T) {
 	msgID := nsq.MessageID{'1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'a', 's', 'd', 'f', 'g', 'h'}
 	msg := nsq.NewMessage(msgID, []byte("cpu_load_short,direction=in,host=server01,region=us-west value=23422.0 1422568543702900257\n"))
 
+	frameMsg, err := frameMessage(msg)
+	require.NoError(t, err)
+
 	script := []instruction{
 		// SUB
 		{0, nsq.FrameTypeResponse, []byte("OK")},
 		// IDENTIFY
 		{0, nsq.FrameTypeResponse, []byte("OK")},
-		{20 * time.Millisecond, nsq.FrameTypeMessage, frameMessage(msg)},
+		{20 * time.Millisecond, nsq.FrameTypeMessage, frameMsg},
 		// needed to exit test
 		{100 * time.Millisecond, -1, []byte("exit")},
 	}
 
 	addr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:4155")
-	newMockNSQD(script, addr.String())
+	newMockNSQD(t, script, addr.String())
 
 	consumer := &NSQConsumer{
 		Log:                    testutil.Logger{},
@@ -45,32 +49,26 @@ func TestReadsMetricsFromNSQ(t *testing.T) {
 		Nsqd:                   []string{"127.0.0.1:4155"},
 	}
 
-	p, _ := parsers.NewInfluxParser()
+	p := &influx.Parser{}
+	require.NoError(t, p.Init())
 	consumer.SetParser(p)
 	var acc testutil.Accumulator
-	assert.Equal(t, 0, len(acc.Metrics), "There should not be any points")
-	if err := consumer.Start(&acc); err != nil {
-		t.Fatal(err.Error())
-	} else {
-		defer consumer.Stop()
-	}
+	require.Len(t, acc.Metrics, 0, "There should not be any points")
+	require.NoError(t, consumer.Start(&acc))
 
 	waitForPoint(&acc, t)
 
-	if len(acc.Metrics) == 1 {
-		point := acc.Metrics[0]
-		assert.Equal(t, "cpu_load_short", point.Measurement)
-		assert.Equal(t, map[string]interface{}{"value": 23422.0}, point.Fields)
-		assert.Equal(t, map[string]string{
-			"host":      "server01",
-			"direction": "in",
-			"region":    "us-west",
-		}, point.Tags)
-		assert.Equal(t, time.Unix(0, 1422568543702900257).Unix(), point.Time.Unix())
-	} else {
-		t.Errorf("No points found in accumulator, expected 1")
-	}
+	require.Len(t, acc.Metrics, 1, "No points found in accumulator, expected 1")
 
+	point := acc.Metrics[0]
+	require.Equal(t, "cpu_load_short", point.Measurement)
+	require.Equal(t, map[string]interface{}{"value": 23422.0}, point.Fields)
+	require.Equal(t, map[string]string{
+		"host":      "server01",
+		"direction": "in",
+		"region":    "us-west",
+	}, point.Tags)
+	require.Equal(t, time.Unix(0, 1422568543702900257).Unix(), point.Time.Unix())
 }
 
 // Waits for the metric that was sent to the kafka broker to arrive at the kafka
@@ -80,6 +78,8 @@ func waitForPoint(acc *testutil.Accumulator, t *testing.T) {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	counter := 0
+
+	//nolint:gosimple // for-select used on purpose
 	for {
 		select {
 		case <-ticker.C:
@@ -93,16 +93,15 @@ func waitForPoint(acc *testutil.Accumulator, t *testing.T) {
 	}
 }
 
-func newMockNSQD(script []instruction, addr string) *mockNSQD {
+func newMockNSQD(t *testing.T, script []instruction, addr string) *mockNSQD {
 	n := &mockNSQD{
 		script:   script,
 		exitChan: make(chan int),
 	}
 
 	tcpListener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("FATAL: listen (%s) failed - %s", n.tcpAddr.String(), err)
-	}
+	require.NoError(t, err, "listen (%s) failed", n.tcpAddr.String())
+
 	n.tcpListener = tcpListener
 	n.tcpAddr = tcpListener.Addr().(*net.TCPAddr)
 
@@ -143,6 +142,7 @@ func (n *mockNSQD) handle(conn net.Conn) {
 	buf := make([]byte, 4)
 	_, err := io.ReadFull(conn, buf)
 	if err != nil {
+		//nolint:revive // log.Fatalf called intentionally
 		log.Fatalf("ERROR: failed to read protocol version - %s", err)
 	}
 
@@ -175,14 +175,14 @@ func (n *mockNSQD) handle(conn net.Conn) {
 				l := make([]byte, 4)
 				_, err := io.ReadFull(rdr, l)
 				if err != nil {
-					log.Printf(err.Error())
+					log.Print(err.Error())
 					goto exit
 				}
 				size := int32(binary.BigEndian.Uint32(l))
 				b := make([]byte, size)
 				_, err = io.ReadFull(rdr, b)
 				if err != nil {
-					log.Printf(err.Error())
+					log.Print(err.Error())
 					goto exit
 				}
 			case bytes.Equal(params[0], []byte("RDY")):
@@ -204,9 +204,14 @@ func (n *mockNSQD) handle(conn net.Conn) {
 				}
 				rdyCount--
 			}
-			_, err := conn.Write(framedResponse(inst.frameType, inst.body))
+			buf, err := framedResponse(inst.frameType, inst.body)
 			if err != nil {
-				log.Printf(err.Error())
+				log.Print(err.Error())
+				goto exit
+			}
+			_, err = conn.Write(buf)
+			if err != nil {
+				log.Print(err.Error())
 				goto exit
 			}
 			scriptTime = time.After(n.script[idx+1].delay)
@@ -215,11 +220,11 @@ func (n *mockNSQD) handle(conn net.Conn) {
 	}
 
 exit:
-	n.tcpListener.Close()
-	conn.Close()
+	n.tcpListener.Close() //nolint:revive // ignore the returned error as we cannot do anything about it anyway
+	conn.Close()          //nolint:revive // ignore the returned error as we cannot do anything about it anyway
 }
 
-func framedResponse(frameType int32, data []byte) []byte {
+func framedResponse(frameType int32, data []byte) ([]byte, error) {
 	var w bytes.Buffer
 
 	beBuf := make([]byte, 4)
@@ -228,21 +233,21 @@ func framedResponse(frameType int32, data []byte) []byte {
 	binary.BigEndian.PutUint32(beBuf, size)
 	_, err := w.Write(beBuf)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	binary.BigEndian.PutUint32(beBuf, uint32(frameType))
 	_, err = w.Write(beBuf)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
-	w.Write(data)
-	return w.Bytes()
+	_, err = w.Write(data)
+	return w.Bytes(), err
 }
 
-func frameMessage(m *nsq.Message) []byte {
+func frameMessage(m *nsq.Message) ([]byte, error) {
 	var b bytes.Buffer
-	m.WriteTo(&b)
-	return b.Bytes()
+	_, err := m.WriteTo(&b)
+	return b.Bytes(), err
 }

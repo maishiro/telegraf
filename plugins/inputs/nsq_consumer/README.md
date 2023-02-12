@@ -3,9 +3,18 @@
 The [NSQ][nsq] consumer plugin reads from NSQD and creates metrics using one
 of the supported [input data formats][].
 
-### Configuration:
+## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
-```toml
+In addition to the plugin-specific configuration settings, plugins support
+additional global and plugin configuration settings. These settings are used to
+modify metrics, tags, and field or create aliases and configure ordering, etc.
+See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
+
+[CONFIGURATION.md]: ../../../docs/CONFIGURATION.md#plugins
+
+## Configuration
+
+```toml @sample.conf
 # Read metrics from NSQD topic(s)
 [[inputs.nsq_consumer]]
   ## Server option still works but is deprecated, we just prepend it to the nsqd array.
@@ -39,3 +48,7 @@ of the supported [input data formats][].
 
 [nsq]: https://nsq.io
 [input data formats]: /docs/DATA_FORMATS_INPUT.md
+
+## Metrics
+
+## Example Output

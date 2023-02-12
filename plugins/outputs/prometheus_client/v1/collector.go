@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
+	serializer "github.com/influxdata/telegraf/plugins/serializers/prometheus"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -56,16 +57,29 @@ type Collector struct {
 	Log                telegraf.Logger
 
 	sync.Mutex
-	fam map[string]*MetricFamily
+	fam          map[string]*MetricFamily
+	expireTicker *time.Ticker
 }
 
 func NewCollector(expire time.Duration, stringsAsLabel bool, logger telegraf.Logger) *Collector {
-	return &Collector{
+	c := &Collector{
 		ExpirationInterval: expire,
 		StringAsLabel:      stringsAsLabel,
 		Log:                logger,
 		fam:                make(map[string]*MetricFamily),
 	}
+
+	if c.ExpirationInterval != 0 {
+		c.expireTicker = time.NewTicker(c.ExpirationInterval)
+		go func() {
+			for {
+				<-c.expireTicker.C
+				c.Expire(time.Now())
+			}
+		}()
+	}
+
+	return c
 }
 
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
@@ -75,8 +89,6 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.Lock()
 	defer c.Unlock()
-
-	c.Expire(time.Now(), c.ExpirationInterval)
 
 	for name, family := range c.fam {
 		// Get list of all labels on MetricFamily
@@ -152,7 +164,6 @@ func CreateSampleID(tags map[string]string) SampleID {
 }
 
 func addSample(fam *MetricFamily, sample *Sample, sampleID SampleID) {
-
 	for k := range sample.Labels {
 		fam.LabelSet[k]++
 	}
@@ -201,25 +212,27 @@ func (c *Collector) Add(metrics []telegraf.Metric) error {
 
 		labels := make(map[string]string)
 		for k, v := range tags {
-			tName := sanitize(k)
-			if !isValidTagName(tName) {
+			name, ok := serializer.SanitizeLabelName(k)
+			if !ok {
 				continue
 			}
-			labels[tName] = v
+			labels[name] = v
 		}
 
 		// Prometheus doesn't have a string value type, so convert string
 		// fields to labels if enabled.
 		if c.StringAsLabel {
 			for fn, fv := range point.Fields() {
-				switch fv := fv.(type) {
-				case string:
-					tName := sanitize(fn)
-					if !isValidTagName(tName) {
-						continue
-					}
-					labels[tName] = fv
+				sfv, ok := fv.(string)
+				if !ok {
+					continue
 				}
+
+				name, ok := serializer.SanitizeLabelName(fn)
+				if !ok {
+					continue
+				}
+				labels[name] = sfv
 			}
 		}
 
@@ -362,21 +375,19 @@ func (c *Collector) Add(metrics []telegraf.Metric) error {
 					continue
 				}
 				c.addMetricFamily(point, sample, mname, sampleID)
-
 			}
 		}
 	}
 	return nil
 }
 
-func (c *Collector) Expire(now time.Time, age time.Duration) {
-	if age == 0 {
-		return
-	}
+func (c *Collector) Expire(now time.Time) {
+	c.Lock()
+	defer c.Unlock()
 
 	for name, family := range c.fam {
 		for key, sample := range family.Samples {
-			if age != 0 && now.After(sample.Expiration) {
+			if now.After(sample.Expiration) {
 				for k := range sample.Labels {
 					family.LabelSet[k]--
 				}

@@ -4,22 +4,54 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/assert"
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/testutil"
 )
 
-func TestPostgresqlGeneratesMetrics(t *testing.T) {
+const servicePort = "5432"
+
+func launchTestContainer(t *testing.T) *testutil.Container {
+	container := testutil.Container{
+		Image:        "postgres:alpine",
+		ExposedPorts: []string{servicePort},
+		Env: map[string]string{
+			"POSTGRES_HOST_AUTH_METHOD": "trust",
+		},
+		WaitingFor: wait.ForAll(
+			// the database comes up twice, once right away, then again a second
+			// time after the docker entrypoint starts configuraiton
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+			wait.ForListeningPort(nat.Port(servicePort)),
+		),
+	}
+
+	err := container.Start()
+	require.NoError(t, err, "failed to start container")
+
+	return &container
+}
+
+func TestPostgresqlGeneratesMetricsIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	container := launchTestContainer(t)
+	defer container.Terminate()
+
+	addr := fmt.Sprintf(
+		"host=%s port=%s user=postgres sslmode=disable",
+		container.Address,
+		container.Ports[servicePort],
+	)
+
 	p := &Postgresql{
 		Service: Service{
-			Address: fmt.Sprintf(
-				"host=%s user=postgres sslmode=disable",
-				testutil.GetLocalHost(),
-			),
+			Address:     config.NewSecret([]byte(addr)),
 			IsPgBouncer: false,
 		},
 		Databases: []string{"postgres"},
@@ -71,40 +103,46 @@ func TestPostgresqlGeneratesMetrics(t *testing.T) {
 	metricsCounted := 0
 
 	for _, metric := range intMetrics {
-		assert.True(t, acc.HasInt64Field("postgresql", metric))
+		require.True(t, acc.HasInt64Field("postgresql", metric))
 		metricsCounted++
 	}
 
 	for _, metric := range int32Metrics {
-		assert.True(t, acc.HasInt32Field("postgresql", metric))
+		require.True(t, acc.HasInt32Field("postgresql", metric))
 		metricsCounted++
 	}
 
 	for _, metric := range floatMetrics {
-		assert.True(t, acc.HasFloatField("postgresql", metric))
+		require.True(t, acc.HasFloatField("postgresql", metric))
 		metricsCounted++
 	}
 
 	for _, metric := range stringMetrics {
-		assert.True(t, acc.HasStringField("postgresql", metric))
+		require.True(t, acc.HasStringField("postgresql", metric))
 		metricsCounted++
 	}
 
-	assert.True(t, metricsCounted > 0)
-	assert.Equal(t, len(floatMetrics)+len(intMetrics)+len(int32Metrics)+len(stringMetrics), metricsCounted)
+	require.True(t, metricsCounted > 0)
+	require.Equal(t, len(floatMetrics)+len(intMetrics)+len(int32Metrics)+len(stringMetrics), metricsCounted)
 }
 
-func TestPostgresqlTagsMetricsWithDatabaseName(t *testing.T) {
+func TestPostgresqlTagsMetricsWithDatabaseNameIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	container := launchTestContainer(t)
+	defer container.Terminate()
+
+	addr := fmt.Sprintf(
+		"host=%s port=%s user=postgres sslmode=disable",
+		container.Address,
+		container.Ports[servicePort],
+	)
+
 	p := &Postgresql{
 		Service: Service{
-			Address: fmt.Sprintf(
-				"host=%s user=postgres sslmode=disable",
-				testutil.GetLocalHost(),
-			),
+			Address: config.NewSecret([]byte(addr)),
 		},
 		Databases: []string{"postgres"},
 	}
@@ -117,20 +155,26 @@ func TestPostgresqlTagsMetricsWithDatabaseName(t *testing.T) {
 	point, ok := acc.Get("postgresql")
 	require.True(t, ok)
 
-	assert.Equal(t, "postgres", point.Tags["db"])
+	require.Equal(t, "postgres", point.Tags["db"])
 }
 
-func TestPostgresqlDefaultsToAllDatabases(t *testing.T) {
+func TestPostgresqlDefaultsToAllDatabasesIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	container := launchTestContainer(t)
+	defer container.Terminate()
+
+	addr := fmt.Sprintf(
+		"host=%s port=%s user=postgres sslmode=disable",
+		container.Address,
+		container.Ports[servicePort],
+	)
+
 	p := &Postgresql{
 		Service: Service{
-			Address: fmt.Sprintf(
-				"host=%s user=postgres sslmode=disable",
-				testutil.GetLocalHost(),
-			),
+			Address: config.NewSecret([]byte(addr)),
 		},
 	}
 
@@ -150,20 +194,26 @@ func TestPostgresqlDefaultsToAllDatabases(t *testing.T) {
 		}
 	}
 
-	assert.True(t, found)
+	require.True(t, found)
 }
 
-func TestPostgresqlIgnoresUnwantedColumns(t *testing.T) {
+func TestPostgresqlIgnoresUnwantedColumnsIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	container := launchTestContainer(t)
+	defer container.Terminate()
+
+	addr := fmt.Sprintf(
+		"host=%s port=%s user=postgres sslmode=disable",
+		container.Address,
+		container.Ports[servicePort],
+	)
+
 	p := &Postgresql{
 		Service: Service{
-			Address: fmt.Sprintf(
-				"host=%s user=postgres sslmode=disable",
-				testutil.GetLocalHost(),
-			),
+			Address: config.NewSecret([]byte(addr)),
 		},
 	}
 
@@ -172,21 +222,27 @@ func TestPostgresqlIgnoresUnwantedColumns(t *testing.T) {
 	require.NoError(t, p.Gather(&acc))
 
 	for col := range p.IgnoredColumns() {
-		assert.False(t, acc.HasMeasurement(col))
+		require.False(t, acc.HasMeasurement(col))
 	}
 }
 
-func TestPostgresqlDatabaseWhitelistTest(t *testing.T) {
+func TestPostgresqlDatabaseWhitelistTestIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	container := launchTestContainer(t)
+	defer container.Terminate()
+
+	addr := fmt.Sprintf(
+		"host=%s port=%s user=postgres sslmode=disable",
+		container.Address,
+		container.Ports[servicePort],
+	)
+
 	p := &Postgresql{
 		Service: Service{
-			Address: fmt.Sprintf(
-				"host=%s user=postgres sslmode=disable",
-				testutil.GetLocalHost(),
-			),
+			Address: config.NewSecret([]byte(addr)),
 		},
 		Databases: []string{"template0"},
 	}
@@ -212,21 +268,27 @@ func TestPostgresqlDatabaseWhitelistTest(t *testing.T) {
 		}
 	}
 
-	assert.True(t, foundTemplate0)
-	assert.False(t, foundTemplate1)
+	require.True(t, foundTemplate0)
+	require.False(t, foundTemplate1)
 }
 
-func TestPostgresqlDatabaseBlacklistTest(t *testing.T) {
+func TestPostgresqlDatabaseBlacklistTestIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	container := launchTestContainer(t)
+	defer container.Terminate()
+
+	addr := fmt.Sprintf(
+		"host=%s port=%s user=postgres sslmode=disable",
+		container.Address,
+		container.Ports[servicePort],
+	)
+
 	p := &Postgresql{
 		Service: Service{
-			Address: fmt.Sprintf(
-				"host=%s user=postgres sslmode=disable",
-				testutil.GetLocalHost(),
-			),
+			Address: config.NewSecret([]byte(addr)),
 		},
 		IgnoredDatabases: []string{"template0"},
 	}
@@ -251,6 +313,6 @@ func TestPostgresqlDatabaseBlacklistTest(t *testing.T) {
 		}
 	}
 
-	assert.False(t, foundTemplate0)
-	assert.True(t, foundTemplate1)
+	require.False(t, foundTemplate0)
+	require.True(t, foundTemplate1)
 }
