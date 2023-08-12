@@ -6,6 +6,17 @@ and creates metrics using one of the supported [input data formats][].
 For old kafka version (< 0.8), please use the [kafka_consumer_legacy][] input
 plugin and use the old zookeeper connection method.
 
+## Service Input <!-- @/docs/includes/service_input.md -->
+
+This plugin is a service input. Normal plugins gather metrics determined by the
+interval setting. Service plugins start a service to listens and waits for
+metrics or events to occur. Service plugins have two key differences from
+normal plugins:
+
+1. The global or plugin specific `interval` setting may not apply
+2. The CLI options of `--test`, `--test-wait`, and `--once` may not produce
+   output for this plugin
+
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
 In addition to the plugin-specific configuration settings, plugins support
@@ -34,6 +45,10 @@ to use them.
 
   ## Topics to consume.
   topics = ["telegraf"]
+
+  ## Topic regular expressions to consume.  Matches will be added to topics.
+  ## Example: topic_regexps = [ "*test", "metric[0-9A-z]*" ]
+  # topic_regexps = [ ]
 
   ## When set this tag will be added to all metrics with the topic as the value.
   # topic_tag = ""
@@ -68,7 +83,7 @@ to use them.
   ## (defaults to PLAIN)
   # sasl_mechanism = ""
 
-  ## used if sasl_mechanism is GSSAPI (experimental)
+  ## used if sasl_mechanism is GSSAPI
   # sasl_gssapi_service_name = ""
   # ## One of: KRB5_USER_AUTH and KRB5_KEYTAB_AUTH
   # sasl_gssapi_auth_type = "KRB5_USER_AUTH"
@@ -77,7 +92,7 @@ to use them.
   # sasl_gssapi_key_tab_path = ""
   # sasl_gssapi_disable_pafxfast = false
 
-  ## used if sasl_mechanism is OAUTHBEARER (experimental)
+  ## used if sasl_mechanism is OAUTHBEARER
   # sasl_access_token = ""
 
   ## SASL protocol version.  When connecting to Azure EventHub set to 0.
@@ -133,14 +148,16 @@ to use them.
   ## larger messages are dropped
   max_message_len = 1000000
 
-  ## Maximum messages to read from the broker that have not been written by an
-  ## output.  For best throughput set based on the number of metrics within
-  ## each message and the size of the output's metric_batch_size.
+  ## Max undelivered messages
+  ## This plugin uses tracking metrics, which ensure messages are read to
+  ## outputs before acknowledging them to the original broker to ensure data
+  ## is not lost. This option sets the maximum messages to read from the
+  ## broker that have not been written by an output.
   ##
-  ## For example, if each message from the queue contains 10 metrics and the
-  ## output metric_batch_size is 1000, setting this to 100 will ensure that a
-  ## full batch is collected and the write is triggered immediately without
-  ## waiting until the next flush_interval.
+  ## This value needs to be picked with awareness of the agent's
+  ## metric_batch_size value as well. Setting max undelivered messages too high
+  ## can result in a constant stream of data batches to the output. While
+  ## setting it too low may never flush the broker's messages.
   # max_undelivered_messages = 1000
 
   ## Maximum amount of time the consumer should take to process messages. If
