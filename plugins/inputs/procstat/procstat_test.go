@@ -169,6 +169,10 @@ func (p *testProc) Ppid() (int32, error) {
 	return 0, nil
 }
 
+func (p *testProc) Status() ([]string, error) {
+	return []string{"running"}, nil
+}
+
 var pid = PID(42)
 var exe = "foo"
 
@@ -385,7 +389,7 @@ func TestGather_cgroupPIDs(t *testing.T) {
 		t.Skip("no cgroups in windows")
 	}
 	td := t.TempDir()
-	err := os.WriteFile(filepath.Join(td, "cgroup.procs"), []byte("1234\n5678\n"), 0644)
+	err := os.WriteFile(filepath.Join(td, "cgroup.procs"), []byte("1234\n5678\n"), 0640)
 	require.NoError(t, err)
 
 	p := Procstat{

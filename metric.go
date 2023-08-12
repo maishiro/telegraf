@@ -123,3 +123,16 @@ type Metric interface {
 	// to any output.
 	Drop()
 }
+
+// TemplateMetric is an interface to use in templates (e.g text/template)
+// to generate complex strings from metric properties
+// e.g. '{{.Neasurement}}-{{.Tag "foo"}}-{{.Field "bar"}}'
+type TemplateMetric interface {
+	Name() string
+	Field(key string) interface{}
+	Fields() map[string]interface{}
+	Tag(key string) string
+	Tags() map[string]string
+	Time() time.Time
+	String() string
+}
