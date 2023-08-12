@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -59,6 +60,7 @@ type CiscoTelemetryMDT struct {
 	EmbeddedTags       []string              `toml:"embedded_tags"`
 	EnforcementPolicy  GRPCEnforcementPolicy `toml:"grpc_enforcement_policy"`
 	IncludeDeleteField bool                  `toml:"include_delete_field"`
+	SourceFieldName    string                `toml:"source_field_name"`
 
 	Log telegraf.Logger
 
@@ -178,7 +180,7 @@ func (c *CiscoTelemetryMDT) Start(acc telegraf.Accumulator) error {
 		var opts []grpc.ServerOption
 		tlsConfig, err := c.ServerConfig.TLSConfig()
 		if err != nil {
-			c.listener.Close() //nolint:revive // we cannot do anything if the closing fails
+			c.listener.Close()
 			return err
 		} else if tlsConfig != nil {
 			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
@@ -209,7 +211,7 @@ func (c *CiscoTelemetryMDT) Start(acc telegraf.Accumulator) error {
 		}()
 
 	default:
-		c.listener.Close() //nolint:revive // we cannot do anything if the closing fails
+		c.listener.Close()
 		return fmt.Errorf("invalid Cisco MDT transport: %s", c.Transport)
 	}
 
@@ -224,7 +226,8 @@ func (c *CiscoTelemetryMDT) acceptTCPClients() {
 
 	for {
 		conn, err := c.listener.Accept()
-		if neterr, ok := err.(*net.OpError); ok && (neterr.Timeout() || neterr.Temporary()) {
+		var neterr *net.OpError
+		if errors.As(err, &neterr) && (neterr.Timeout() || neterr.Temporary()) {
 			continue
 		} else if err != nil {
 			break // Stop() will close the connection so Accept() will fail here
@@ -319,8 +322,8 @@ func (c *CiscoTelemetryMDT) MdtDialout(stream dialout.GRPCMdtDialout_MdtDialoutS
 	for {
 		packet, err := stream.Recv()
 		if err != nil {
-			if err != io.EOF {
-				c.acc.AddError(fmt.Errorf("GRPC dialout receive error: %v", err))
+			if !errors.Is(err, io.EOF) {
+				c.acc.AddError(fmt.Errorf("GRPC dialout receive error: %w", err))
 			}
 			break
 		}
@@ -335,7 +338,7 @@ func (c *CiscoTelemetryMDT) MdtDialout(stream dialout.GRPCMdtDialout_MdtDialoutS
 			c.handleTelemetry(packet.Data)
 		} else if int(packet.TotalSize) <= c.MaxMsgSize {
 			if _, err := chunkBuffer.Write(packet.Data); err != nil {
-				c.acc.AddError(fmt.Errorf("writing packet %q failed: %v", packet.Data, err))
+				c.acc.AddError(fmt.Errorf("writing packet %q failed: %w", packet.Data, err))
 			}
 			if chunkBuffer.Len() >= int(packet.TotalSize) {
 				c.handleTelemetry(chunkBuffer.Bytes())
@@ -358,7 +361,7 @@ func (c *CiscoTelemetryMDT) handleTelemetry(data []byte) {
 	msg := &telemetry.Telemetry{}
 	err := proto.Unmarshal(data, msg)
 	if err != nil {
-		c.acc.AddError(fmt.Errorf("failed to decode: %v", err))
+		c.acc.AddError(fmt.Errorf("failed to decode: %w", err))
 		return
 	}
 
@@ -394,6 +397,10 @@ func (c *CiscoTelemetryMDT) handleTelemetry(data []byte) {
 			tags = make(map[string]string, len(keys.Fields)+3)
 			for _, subfield := range keys.Fields {
 				c.parseKeyField(tags, subfield, "")
+			}
+			// If incoming MDT contains source key, copy to mdt_src
+			if _, ok := tags["source"]; ok {
+				tags[c.SourceFieldName] = tags["source"]
 			}
 		} else {
 			tags = make(map[string]string, 3)
@@ -729,7 +736,7 @@ func (c *CiscoTelemetryMDT) Stop() {
 		c.grpcServer.Stop()
 	}
 	if c.listener != nil {
-		c.listener.Close() //nolint:revive // we cannot do anything if the closing fails
+		c.listener.Close()
 	}
 	c.wg.Wait()
 }
@@ -742,8 +749,9 @@ func (c *CiscoTelemetryMDT) Gather(_ telegraf.Accumulator) error {
 func init() {
 	inputs.Add("cisco_telemetry_mdt", func() telegraf.Input {
 		return &CiscoTelemetryMDT{
-			Transport:      "grpc",
-			ServiceAddress: "127.0.0.1:57000",
+			Transport:       "grpc",
+			ServiceAddress:  "127.0.0.1:57000",
+			SourceFieldName: "mdt_source",
 		}
 	})
 }

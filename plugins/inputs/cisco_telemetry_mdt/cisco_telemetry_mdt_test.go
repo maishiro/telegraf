@@ -756,7 +756,7 @@ func TestTCPDialoutOverflow(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, binary.Write(conn, binary.BigEndian, hdr))
 	_, err = conn.Read([]byte{0})
-	require.True(t, err == nil || err == io.EOF)
+	require.True(t, err == nil || errors.Is(err, io.EOF))
 	require.NoError(t, conn.Close())
 
 	c.Stop()
@@ -838,7 +838,7 @@ func TestTCPDialoutMultiple(t *testing.T) {
 	_, err = conn2.Write([]byte{0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0})
 	require.NoError(t, err)
 	_, err = conn2.Read([]byte{0})
-	require.True(t, err == nil || err == io.EOF)
+	require.True(t, err == nil || errors.Is(err, io.EOF))
 	require.NoError(t, conn2.Close())
 
 	telemetry.EncodingPath = "type:model/other/path"
@@ -851,7 +851,7 @@ func TestTCPDialoutMultiple(t *testing.T) {
 	_, err = conn.Write([]byte{0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0})
 	require.NoError(t, err)
 	_, err = conn.Read([]byte{0})
-	require.True(t, err == nil || err == io.EOF)
+	require.True(t, err == nil || errors.Is(err, io.EOF))
 	c.Stop()
 	require.NoError(t, conn.Close())
 
@@ -889,7 +889,7 @@ func TestGRPCDialoutError(t *testing.T) {
 
 	// Wait for the server to close
 	_, err = stream.Recv()
-	require.True(t, err == nil || err == io.EOF)
+	require.True(t, err == nil || errors.Is(err, io.EOF))
 	c.Stop()
 
 	require.Equal(t, acc.Errors, []error{errors.New("GRPC dialout error: foobar")})
@@ -928,7 +928,7 @@ func TestGRPCDialoutMultiple(t *testing.T) {
 	require.NoError(t, stream2.Send(args))
 	require.NoError(t, stream2.Send(&dialout.MdtDialoutArgs{Errors: "testclose"}))
 	_, err = stream2.Recv()
-	require.True(t, err == nil || err == io.EOF)
+	require.True(t, err == nil || errors.Is(err, io.EOF))
 	require.NoError(t, conn2.Close())
 
 	telemetry.EncodingPath = "type:model/other/path"
@@ -938,7 +938,7 @@ func TestGRPCDialoutMultiple(t *testing.T) {
 	require.NoError(t, stream.Send(args))
 	require.NoError(t, stream.Send(&dialout.MdtDialoutArgs{Errors: "testclose"}))
 	_, err = stream.Recv()
-	require.True(t, err == nil || err == io.EOF)
+	require.True(t, err == nil || errors.Is(err, io.EOF))
 
 	c.Stop()
 	require.NoError(t, conn.Close())
@@ -982,4 +982,53 @@ func TestGRPCDialoutKeepalive(t *testing.T) {
 
 	c.Stop()
 	require.NoError(t, conn.Close())
+}
+
+func TestSourceFieldRewrite(t *testing.T) {
+	c := &CiscoTelemetryMDT{Log: testutil.Logger{}, Transport: "dummy", Aliases: map[string]string{"alias": "type:model/some/path"}}
+	c.SourceFieldName = "mdt_source"
+	acc := &testutil.Accumulator{}
+	err := c.Start(acc)
+	// error is expected since we are passing in dummy transport
+	require.Error(t, err)
+
+	telemetry := &telemetryBis.Telemetry{
+		MsgTimestamp: 1543236572000,
+		EncodingPath: "type:model/some/path",
+		NodeId:       &telemetryBis.Telemetry_NodeIdStr{NodeIdStr: "hostname"},
+		Subscription: &telemetryBis.Telemetry_SubscriptionIdStr{SubscriptionIdStr: "subscription"},
+		DataGpbkv: []*telemetryBis.TelemetryField{
+			{
+				Fields: []*telemetryBis.TelemetryField{
+					{
+						Name: "keys",
+						Fields: []*telemetryBis.TelemetryField{
+							{
+								Name:        "source",
+								ValueByType: &telemetryBis.TelemetryField_StringValue{StringValue: "str"},
+							},
+						},
+					},
+					{
+						Name: "content",
+						Fields: []*telemetryBis.TelemetryField{
+							{
+								Name:        "bool",
+								ValueByType: &telemetryBis.TelemetryField_BoolValue{BoolValue: false},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	data, err := proto.Marshal(telemetry)
+	require.NoError(t, err)
+
+	c.handleTelemetry(data)
+	require.Empty(t, acc.Errors)
+
+	tags := map[string]string{"path": "type:model/some/path", "mdt_source": "str", "source": "hostname", "subscription": "subscription"}
+	fields := map[string]interface{}{"bool": false}
+	acc.AssertContainsTaggedFields(t, "alias", fields, tags)
 }
