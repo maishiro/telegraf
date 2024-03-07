@@ -193,7 +193,7 @@ require (
 	github.com/xdg/scram v1.0.5
 	github.com/yuin/goldmark v1.6.0
 	go.mongodb.org/mongo-driver v1.14.0
-	go.opentelemetry.io/collector/pdata v1.1.0
+	go.opentelemetry.io/collector/pdata v1.3.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v0.44.0
 	go.opentelemetry.io/otel/sdk/metric v1.21.0
 	go.starlark.net v0.0.0-20231121155337-90ade8b19d09
@@ -210,7 +210,7 @@ require (
 	gonum.org/v1/gonum v0.14.0
 	google.golang.org/api v0.165.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20240205150955-31a09d347014
-	google.golang.org/grpc v1.61.1
+	google.golang.org/grpc v1.62.0
 	google.golang.org/protobuf v1.32.0
 	gopkg.in/gorethink/gorethink.v3 v3.0.5
 	gopkg.in/olivere/elastic.v5 v5.0.86
