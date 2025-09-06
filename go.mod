@@ -174,7 +174,7 @@ require (
 	github.com/prometheus-community/pro-bing v0.7.0
 	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/client_model v0.6.2
-	github.com/prometheus/common v0.65.0
+	github.com/prometheus/common v0.66.1
 	github.com/prometheus/procfs v0.17.0
 	github.com/prometheus/prometheus v0.54.1
 	github.com/rabbitmq/amqp091-go v1.10.0
@@ -196,7 +196,7 @@ require (
 	github.com/snowflakedb/gosnowflake v1.16.0
 	github.com/srebhan/cborquery v1.0.4
 	github.com/srebhan/protobufquery v1.0.4
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	github.com/tbrandon/mbserver v0.0.0-20170611213546-993e1772cc62
 	github.com/tdrn-org/go-hue v0.3.0
 	github.com/testcontainers/testcontainers-go v0.38.0
@@ -249,6 +249,8 @@ require (
 	modernc.org/sqlite v1.38.2
 	software.sslmate.com/src/go-pkcs12 v0.6.0
 )
+
+require go.yaml.in/yaml/v2 v2.4.2 // indirect
 
 require (
 	cel.dev/expr v0.24.0 // indirect
